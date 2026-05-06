@@ -12,8 +12,9 @@ load_rc_config $name
 
 pidfile=/var/run/dnp3guard.pid
 command=/usr/sbin/daemon
+: ${dnp3guard_python:=/usr/local/bin/python3}
 command_args="-f -p ${pidfile} -t dnp3guard \
-  /usr/local/dnp3guard/venv/bin/python \
+  ${dnp3guard_python} \
   /usr/local/dnp3guard/dnp3guard.py \
   --config /usr/local/dnp3guard/dnp3guard.conf"
 

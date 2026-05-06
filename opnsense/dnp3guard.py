@@ -57,9 +57,11 @@ class OPNsense:
 
 # ---------- scoring sink ----------
 class Scorer:
-    def __init__(self, model, feature_cols, benign_label, opnsense):
-        self.model = model
-        self.cols = feature_cols
+    def __init__(self, artifact, benign_label, opnsense):
+        # artifact = {"pipeline": sklearn_pipe, "label_encoder": le, "features": [...]}
+        self.pipe = artifact["pipeline"]
+        self.le = artifact["label_encoder"]
+        self.cols = artifact["features"]
         self.benign = benign_label
         self.opn = opnsense
         self.recent = deque(maxlen=500)
@@ -69,7 +71,7 @@ class Scorer:
             row = {c: flow_dict.get(c, 0) for c in self.cols}
             X = pd.DataFrame([row], columns=self.cols).fillna(0).replace(
                 [np.inf, -np.inf], 0)
-            verdict = str(self.model.predict(X)[0])
+            verdict = str(self.le.inverse_transform(self.pipe.predict(X))[0])
             src = flow_dict.get("src_ip") or flow_dict.get("Src IP")
             self.recent.append((time.time(), src, verdict))
             if verdict != self.benign:
@@ -131,9 +133,10 @@ def main():
     setup_log(cfg["log"]["path"], cfg["log"].get("level", "INFO"))
     logging.info("dnp3guard starting; iface=%s", cfg["capture"]["iface"])
 
-    model = joblib.load(cfg["model"]["path"])
-    feats = load_features(cfg["model"]["features_file"])
-    logging.info("model loaded; %d features", len(feats))
+    artifact = joblib.load(cfg["model"]["path"])
+    if not isinstance(artifact, dict) or "pipeline" not in artifact:
+        raise SystemExit("model.joblib must be the dict produced by export_model.py")
+    logging.info("model loaded; %d features", len(artifact["features"]))
 
     opn = OPNsense(
         cfg["opnsense_api"]["base_url"],
@@ -144,7 +147,7 @@ def main():
         cfg["opnsense_api"].getint("block_ttl_sec", fallback=3600),
     )
 
-    ScoringSession.scorer = Scorer(model, feats, cfg["model"]["benign_label"], opn)
+    ScoringSession.scorer = Scorer(artifact, cfg["model"]["benign_label"], opn)
     ScoringSession.flow_timeout = cfg["capture"].getint("flow_timeout", fallback=15)
 
     # graceful shutdown

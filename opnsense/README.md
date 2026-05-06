@@ -7,23 +7,25 @@ into an OPNsense alias used by a permanent block rule.
 
 ## Why this layout
 
-OPNsense is FreeBSD — `pip` works inside a venv but firmware upgrades wipe
-`/usr/local/lib/python*/site-packages` files not owned by `pkg`. We isolate
-everything under `/usr/local/dnp3guard/` and reinstall on upgrade via a
-`post-upgrade` hook.
+OPNsense is FreeBSD. Python deps are installed system-wide (out of band,
+by you). Only the daemon, config, model, and rc.d script live under
+`/usr/local/dnp3guard/`.
 
 ## One-time install (on the OPNsense box, as root)
 
+Prereq: Python 3 + the deps installed system-wide (`cicflowmeter`,
+`scapy`, `scikit-learn`, `joblib`, `requests`, optionally `xgboost`).
+
 ```sh
-fetch -o - https://<your-host>/install.sh | sh         # or scp install.sh && sh install.sh
+sh install.sh
 ```
 
-`install.sh` does:
-1. `pkg install -y python311 py311-pip py311-numpy py311-scipy py311-scikit-learn py311-pandas`
-2. Creates venv at `/usr/local/dnp3guard/venv`
-3. `pip install cicflowmeter scapy joblib requests`
-4. Drops `dnp3guard.py` + config + `rc.d` script in place
-5. `sysrc dnp3guard_enable=YES && service dnp3guard start`
+`install.sh` only:
+1. Drops `dnp3guard.py` + config + `rc.d` script in place
+2. `sysrc dnp3guard_enable=YES && service dnp3guard start`
+
+If your `python3` lives somewhere other than `/usr/local/bin/python3`,
+override via `sysrc dnp3guard_python=/path/to/python3`.
 
 ## Files
 
@@ -54,11 +56,10 @@ detection inherits the same flow-timeout latency.
 
 ## Surviving firmware upgrades
 
-OPNsense upgrades wipe pip-installed files. After every upgrade run:
+Firmware upgrades wipe non-pkg Python files. After every upgrade,
+reinstall whichever of your global pip deps got removed, then:
 
 ```sh
-/usr/local/dnp3guard/install.sh --reinstall
+sh /usr/local/dnp3guard/install.sh
+service dnp3guard restart
 ```
-
-Or add it to `/usr/local/etc/rc.syshook.d/start/99-dnp3guard` (an OPNsense
-syshook that runs after upgrade boots).
