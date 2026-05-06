@@ -23,9 +23,9 @@ PYTHON=${PYTHON:-python3}
 
 mkdir -p "$OUT/pcap" "$OUT/csv"
 
-# --- start the echo outstation (background) ---------------------------------
-echo "[+] starting outstation_echo on :$PORT"
-$PYTHON "$ROOT/lab/outstation_echo.py" --port "$PORT" >/tmp/outstation_echo.log 2>&1 &
+# --- start the smart outstation (background) -------------------------------
+echo "[+] starting outstation_smart on :$PORT"
+$PYTHON "$ROOT/lab/outstation_smart.py" --port "$PORT" >/tmp/outstation_smart.log 2>&1 &
 ECHO_PID=$!
 trap 'kill $ECHO_PID 2>/dev/null' EXIT INT TERM
 sleep 1
