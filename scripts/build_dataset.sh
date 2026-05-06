@@ -64,18 +64,20 @@ PYHOST="--host $HOST"
 
 # loop attack scripts heavily so we get hundreds of flows per window
 loop() {
+    # Vary the interval modestly across runs so attack-class IAT features
+    # don't become a single fixed value.
     SCRIPT=$1; INTERVAL=${2:-0.3}; COUNT=${3:-200}
     echo "$PYTHON $LAB/attacks/$SCRIPT $PYHOST --count $COUNT --interval $INTERVAL"
 }
 
 run_class NORMAL              "$PYTHON $LAB/normal.py $PYHOST --duration $DURATION --cadence 0.3 --reconnect"
-run_class COLD_RESTART        "$(loop cold_restart.py)"
-run_class WARM_RESTART        "$(loop warm_restart.py)"
-run_class DISABLE_UNSOLICITED "$(loop disable_unsolicited.py)"
-run_class INIT_DATA           "$(loop init_data.py)"
-run_class STOP_APP            "$(loop stop_app.py)"
-run_class DNP3_INFO           "$PYTHON $LAB/attacks/dnp3_info.py $PYHOST --rounds 30 --interval 0.3"
-run_class DNP3_ENUMERATE      "$PYTHON $LAB/attacks/dnp3_enumerate.py $PYHOST --start 0 --end 50"
+run_class COLD_RESTART        "$(loop cold_restart.py 0.25 220)"
+run_class WARM_RESTART        "$(loop warm_restart.py 0.30 200)"
+run_class DISABLE_UNSOLICITED "$(loop disable_unsolicited.py 0.20 250)"
+run_class INIT_DATA           "$(loop init_data.py 0.35 180)"
+run_class STOP_APP            "$(loop stop_app.py 0.28 210)"
+run_class DNP3_INFO           "$PYTHON $LAB/attacks/dnp3_info.py $PYHOST --rounds 40 --interval 0.25"
+run_class DNP3_ENUMERATE      "$PYTHON $LAB/attacks/dnp3_enumerate.py $PYHOST --start 0 --end 200"
 
 echo
 echo "[+] labelling + splitting"

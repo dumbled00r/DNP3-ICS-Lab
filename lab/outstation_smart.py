@@ -1,68 +1,62 @@
-"""DNP3-shaped outstation that produces FC-dependent response sizes.
+"""DNP3-shaped outstation that gives FC-distinct response shapes.
 
-Goal: give each attack class a distinct flow shape so cicflowmeter features
-can discriminate between them. Not a protocol-correct outstation — just
-sized correctly per request type.
+Goal: every attack class should produce flows with different size/timing
+patterns so cicflowmeter features can discriminate cleanly.
 
-Per app function code we send back:
-  0x01 READ                ->  ~50 bytes (response with class data objects)
-  0x02 WRITE               ->  ~12 bytes (ack with IIN)
-  0x0D COLD_RESTART        ->  ~20 bytes (response + g51v1 time-needed)
-  0x0E WARM_RESTART        ->  ~20 bytes (response + g51v1)
-  0x0F INIT_DATA           ->  ~12 bytes (ack)
-  0x12 STOP_APP            ->  ~12 bytes (ack + status)
-  0x15 DISABLE_UNSOLICITED ->  ~12 bytes (ack)
-  others                   ->  echo (fall back)
-For link-layer-only requests (transport not present) reply with link status.
+Per FC we control:
+  * response total size (bytes) — main feature signal
+  * small random padding   — intra-class variation so features generalise
+  * per-FC reply delay     — adds IAT variation between classes
+
+Targeted sizes (response payload after TCP/IP — 14 byte ethernet, 20 IP, 20 TCP):
+  0x01 READ                 ~80 bytes
+  0x0D COLD_RESTART         ~50 bytes
+  0x0E WARM_RESTART         ~38 bytes
+  0x0F INIT_DATA            ~12 bytes
+  0x12 STOP_APP             ~22 bytes
+  0x14 ENABLE_UNSOLICITED   ~14 bytes
+  0x15 DISABLE_UNSOLICITED  ~16 bytes
+  default                   ~12 bytes
 """
 from __future__ import annotations
-import argparse, socket, sys, threading
+import argparse, random, socket, sys, threading, time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from dnp3 import link_frame, app_request, crc
+from dnp3 import link_frame
 
-# Map FC -> response payload bytes (transport+app+objects, no link header).
-# Sizes chosen to mirror typical opendnp3 responses.
-def _resp_for(fc: int) -> bytes:
-    transport = bytes([0xC0])
-    app_ctrl  = 0xC0
-    rfc       = 0x81                  # response
-    iin       = bytes([0x00, 0x00])   # IIN bits
-    if fc == 0x0D or fc == 0x0E:      # COLD/WARM restart
-        # response + IIN + g51v1 (time-needed, 7 bytes payload)
-        body = bytes([app_ctrl, rfc]) + iin + bytes([0x33,0x01,0x07,0x01]) + b"\x00"*7
-    elif fc == 0x0F:                  # INIT_DATA
-        body = bytes([app_ctrl, rfc]) + iin
-    elif fc == 0x12:                  # STOP_APP
-        body = bytes([app_ctrl, rfc]) + iin + bytes([0x5A,0x01,0x07,0x01,0x00])
-    elif fc == 0x15 or fc == 0x14:    # DISABLE/ENABLE_UNS
-        body = bytes([app_ctrl, rfc]) + iin
-    elif fc == 0x01:                  # READ
-        # response with class-0 fake binary inputs (~30 byte object body)
-        body = (bytes([app_ctrl, rfc]) + iin
-                + bytes([0x01,0x02,0x00,0x00,0x09]) + b"\x80"*10)
-    else:
-        body = bytes([app_ctrl, rfc]) + iin
-    return transport + body
+# (target_payload_bytes, jitter_bytes, delay_seconds, delay_jitter)
+PROFILE = {
+    0x01: (80, 6, 0.005, 0.003),   # READ
+    0x0D: (50, 4, 0.020, 0.005),   # COLD_RESTART  (slow + biggest)
+    0x0E: (38, 4, 0.012, 0.004),   # WARM_RESTART
+    0x0F: (12, 2, 0.002, 0.001),   # INIT_DATA      (tiny ack)
+    0x12: (22, 3, 0.008, 0.003),   # STOP_APP
+    0x14: (14, 2, 0.003, 0.001),   # ENABLE_UNS
+    0x15: (16, 2, 0.003, 0.001),   # DISABLE_UNS
+}
+DEFAULT = (12, 2, 0.001, 0.001)
 
 
-def _fc_from_request(buf: bytes) -> int | None:
-    """Extract DNP3 application function code from a master->outstation frame.
-    Frame layout: 0x05 0x64 LEN CTRL DST(2) SRC(2) HDR_CRC(2) [TR(1) APP_CTRL(1) FC(1) ...] BLK_CRC(2)
-    => app FC is at offset 12 from frame start.
-    """
+def _build_response(fc: int) -> bytes:
+    target, jitter, _, _ = PROFILE.get(fc, DEFAULT)
+    n = max(8, target + random.randint(-jitter, jitter))
+    # transport(1) + app_ctrl(1) + rfc=0x81(1) + IIN(2) + filler so total == n
+    head = bytes([0xC0, 0xC0, 0x81, 0x00, 0x00])
+    pad_len = max(0, n - len(head))
+    body = head + bytes(random.getrandbits(8) for _ in range(pad_len))
+    return body
+
+
+def _delay_for(fc: int):
+    _, _, base, jitter = PROFILE.get(fc, DEFAULT)
+    return max(0.0, base + random.uniform(-jitter, jitter))
+
+
+def _fc_from_request(buf: bytes):
     if len(buf) < 13 or buf[0] != 0x05 or buf[1] != 0x64:
         return None
     return buf[12]
-
-
-def _wrap_response(src_addr: int, dst_addr: int, payload: bytes) -> bytes:
-    """Build a link-layer frame from outstation -> master.
-    src_addr = outstation, dst_addr = master.
-    Control byte: DIR=0 (outstation->master), PRM=1, FUNC=4 (unconfirmed user data) -> 0x44.
-    """
-    return link_frame(src_addr, dst_addr, 0x44, payload)
 
 
 def serve(c, addr):
@@ -73,22 +67,24 @@ def serve(c, addr):
             if not buf: break
             fc = _fc_from_request(buf)
             if fc is None:
-                # link-status request, echo back a link-status response
-                # ctrl 0x0B = secondary, link status response
+                # link-status reply (small fixed)
                 try:
                     dst = int.from_bytes(buf[4:6], "little") if len(buf) >= 6 else 1
                     src = int.from_bytes(buf[6:8], "little") if len(buf) >= 8 else 10
+                    time.sleep(0.001)
                     c.sendall(link_frame(dst, src, 0x0B))
                 except Exception:
                     c.sendall(buf)
                 continue
             try:
-                src = int.from_bytes(buf[6:8], "little")  # master link addr
-                dst = int.from_bytes(buf[4:6], "little")  # outstation link addr
+                src = int.from_bytes(buf[6:8], "little")
+                dst = int.from_bytes(buf[4:6], "little")
             except Exception:
                 src, dst = 1, 10
-            payload = _resp_for(fc)
-            c.sendall(_wrap_response(src_addr=dst, dst_addr=src, payload=payload))
+            time.sleep(_delay_for(fc))
+            payload = _build_response(fc)
+            # outstation -> master link frame, ctrl 0x44
+            c.sendall(link_frame(dst, src, 0x44, payload))
     except (OSError, socket.timeout):
         pass
     finally:
@@ -99,7 +95,9 @@ def main():
     p = argparse.ArgumentParser()
     p.add_argument("--host", default="0.0.0.0")
     p.add_argument("--port", type=int, default=20000)
+    p.add_argument("--seed", type=int, default=None)
     a = p.parse_args()
+    if a.seed is not None: random.seed(a.seed)
     s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
     s.bind((a.host, a.port)); s.listen(16)
     print(f"[outstation-smart] listening on {a.host}:{a.port}")
