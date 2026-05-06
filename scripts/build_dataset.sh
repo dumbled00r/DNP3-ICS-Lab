@@ -48,7 +48,10 @@ run_class() {
     wait $TCPDUMP_PID 2>/dev/null || true
     echo "    pcap: $(ls -lh "$PCAP" | awk '{print $5}')"
 
-    cicflowmeter -f "$PCAP" -c "$CSV" >/dev/null 2>&1
+    # cicflowmeter can be slow on pcaps with hundreds of short flows
+    # (DNP3_ENUMERATE in particular). Cap it at 5 minutes per class.
+    timeout 300 cicflowmeter -f "$PCAP" -c "$CSV" >/dev/null 2>&1 || \
+        echo "    [!] cicflowmeter timed out / failed for $LABEL"
     LINES=$(wc -l <"$CSV" 2>/dev/null || echo 0)
     echo "    flows: $((LINES - 1))"
 }
@@ -65,14 +68,14 @@ loop() {
     echo "$PYTHON $LAB/attacks/$SCRIPT $PYHOST --count $COUNT --interval $INTERVAL"
 }
 
-run_class NORMAL              "$PYTHON $LAB/normal.py $PYHOST --duration $DURATION --cadence 0.3"
+run_class NORMAL              "$PYTHON $LAB/normal.py $PYHOST --duration $DURATION --cadence 0.3 --reconnect"
 run_class COLD_RESTART        "$(loop cold_restart.py)"
 run_class WARM_RESTART        "$(loop warm_restart.py)"
 run_class DISABLE_UNSOLICITED "$(loop disable_unsolicited.py)"
 run_class INIT_DATA           "$(loop init_data.py)"
 run_class STOP_APP            "$(loop stop_app.py)"
 run_class DNP3_INFO           "$PYTHON $LAB/attacks/dnp3_info.py $PYHOST --rounds 30 --interval 0.3"
-run_class DNP3_ENUMERATE      "$PYTHON $LAB/attacks/dnp3_enumerate.py $PYHOST --start 0 --end 200"
+run_class DNP3_ENUMERATE      "$PYTHON $LAB/attacks/dnp3_enumerate.py $PYHOST --start 0 --end 50"
 
 echo
 echo "[+] labelling + splitting"
