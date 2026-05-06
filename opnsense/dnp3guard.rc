@@ -1,0 +1,20 @@
+#!/bin/sh
+# PROVIDE: dnp3guard
+# REQUIRE: NETWORKING SERVERS
+# KEYWORD: shutdown
+
+. /etc/rc.subr
+
+name=dnp3guard
+rcvar=dnp3guard_enable
+load_rc_config $name
+: ${dnp3guard_enable:=NO}
+
+pidfile=/var/run/dnp3guard.pid
+command=/usr/sbin/daemon
+command_args="-f -p ${pidfile} -t dnp3guard \
+  /usr/local/dnp3guard/venv/bin/python \
+  /usr/local/dnp3guard/dnp3guard.py \
+  --config /usr/local/dnp3guard/dnp3guard.conf"
+
+run_rc_command "$1"

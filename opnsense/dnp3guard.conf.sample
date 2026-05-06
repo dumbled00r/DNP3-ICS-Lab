@@ -1,0 +1,25 @@
+# /usr/local/dnp3guard/dnp3guard.conf
+[capture]
+iface          = igb1            # LAN-side interface carrying DNP3
+bpf            = tcp port 20000
+flow_timeout   = 15              # seconds; lowered from cicflowmeter default
+
+[model]
+path           = /usr/local/dnp3guard/model.joblib
+# ordered list of feature column names the model was trained on, comma-sep,
+# matching CICFlowMeter column names exactly. Loaded as Python list.
+features_file  = /usr/local/dnp3guard/features.txt
+# label index that means "benign" — verdicts != benign trigger a block
+benign_label   = NORMAL
+
+[opnsense_api]
+base_url       = https://127.0.0.1
+key            = REPLACE_ME
+secret         = REPLACE_ME
+verify_tls     = false
+alias_name     = dnp3_blocklist
+block_ttl_sec  = 3600            # auto-expire blocks; 0 = permanent
+
+[log]
+path           = /var/log/dnp3guard.log
+level          = INFO
