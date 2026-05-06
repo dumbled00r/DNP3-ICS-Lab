@@ -26,9 +26,9 @@ from sklearn.ensemble       import RandomForestClassifier
 from sklearn.metrics        import accuracy_score, f1_score
 from xgboost                import XGBClassifier
 
-TRAIN_CSV = r"d:\BKCSLab\DNP3\ics_lab\data_sample\CICFlowMeter_Training_Balanced.csv"
-TEST_CSV  = r"d:\BKCSLab\DNP3\ics_lab\data_sample\CICFlowMeter_Testing_Balanced.csv"
-OUT_DIR   = r"d:\BKCSLab\DNP3\ics_lab\artifacts"
+TRAIN_CSV_DEFAULT = r"d:\BKCSLab\DNP3\ics_lab\data_sample\CICFlowMeter_Training_Balanced.csv"
+TEST_CSV_DEFAULT  = r"d:\BKCSLab\DNP3\ics_lab\data_sample\CICFlowMeter_Testing_Balanced.csv"
+OUT_DIR_DEFAULT   = r"d:\BKCSLab\DNP3\ics_lab\artifacts"
 
 DROP_COLS = ["Unnamed: 0.1", "Unnamed: 0", "Flow ID",
              "Src IP", "Dst IP", "Timestamp"]
@@ -128,12 +128,16 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", choices=["xgb", "rf"], default="xgb")
     ap.add_argument("--features", default="all",
-                    help='"all" (default), "variance", or "top-N" (e.g. top-40)')
+                    help='"all" (default), "variance", "top-N", "smart-N", '
+                         '"importance-N", "corr-N"')
+    ap.add_argument("--train", default=TRAIN_CSV_DEFAULT)
+    ap.add_argument("--test",  default=TEST_CSV_DEFAULT)
+    ap.add_argument("--out",   default=OUT_DIR_DEFAULT)
     args = ap.parse_args()
-    os.makedirs(OUT_DIR, exist_ok=True)
+    os.makedirs(args.out, exist_ok=True)
 
-    Xtr, ytr = load(TRAIN_CSV)
-    Xte, yte = load(TEST_CSV)
+    Xtr, ytr = load(args.train)
+    Xte, yte = load(args.test)
     common = [c for c in Xtr.columns if c in Xte.columns]
     Xtr = Xtr[common].astype(np.float32)
     Xte = Xte[common].astype(np.float32)
@@ -159,11 +163,11 @@ def main():
           f"macro-f1 = {f1_score(yte_enc, yhat, average='macro'):.4f}")
 
     artifact = {"pipeline": pipe, "label_encoder": le, "features": kept}
-    joblib.dump(artifact, os.path.join(OUT_DIR, "model.joblib"))
-    with open(os.path.join(OUT_DIR, "features.txt"), "w") as f:
+    joblib.dump(artifact, os.path.join(args.out, "model.joblib"))
+    with open(os.path.join(args.out, "features.txt"), "w") as f:
         f.write("\n".join(kept) + "\n")
-    print(f"saved -> {OUT_DIR}/model.joblib  ({len(kept)} features)")
-    print(f"saved -> {OUT_DIR}/features.txt")
+    print(f"saved -> {args.out}/model.joblib  ({len(kept)} features)")
+    print(f"saved -> {args.out}/features.txt")
 
 
 if __name__ == "__main__":
