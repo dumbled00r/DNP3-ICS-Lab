@@ -1,0 +1,12 @@
+{
+  "server": {
+    "host": "127.0.0.1",
+    "port": 5020
+  },
+  "client": {
+    "host": "127.0.0.1",
+    "port": 5020,
+    "poll_interval_s": 1.0
+  }
+}
+

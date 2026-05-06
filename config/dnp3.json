@@ -1,0 +1,12 @@
+{
+  "outstation": {
+    "host": "127.0.0.1",
+    "port": 20000
+  },
+  "master": {
+    "host": "127.0.0.1",
+    "port": 20000,
+    "poll_interval_s": 1.0
+  }
+}
+

