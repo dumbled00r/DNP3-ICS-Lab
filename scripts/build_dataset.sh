@@ -1,46 +1,40 @@
 #!/bin/sh
-# Build a labelled DNP3 flow dataset on YOUR lab topology.
+# Build a labelled DNP3 flow dataset that mirrors the original UOWM dataset.
 #
 # Per class:
-#   1. start tcpdump on $IFACE filtering tcp/$PORT
-#   2. run the matching attack/normal script for $DURATION seconds
-#   3. close pcap; cicflowmeter -> per-class CSV
-# Then label_and_split.py merges + adds Label + 80/20 splits.
-#
-# Run on OPNsense (or any Linux/BSD with tcpdump + cicflowmeter + python3).
-#
-# Vars (override on the command line):
-#   IFACE=lo0 PORT=20000 OUT=/var/log/dnp3guard/dataset \
-#   DURATION=60 sh scripts/build_dataset.sh
+#   1. start outstation_real (proper response sizes per request type)
+#   2. run master_session for $DURATION seconds:
+#         continuous class-1 polls + periodic class-0 + periodic attack frame
+#         reconnects every ~5s -> multiple flows per class
+#   3. tcpdump captures TCP/$PORT traffic during the session
+#   4. cicflowmeter -> per-class CSV
+# Then label_and_split.py merges + 80/20 splits.
 
 set -eu
 IFACE=${IFACE:-lo0}
 PORT=${PORT:-20000}
 OUT=${OUT:-/var/log/dnp3guard/dataset}
-DURATION=${DURATION:-60}          # seconds of capture per class
+DURATION=${DURATION:-60}
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PYTHON=${PYTHON:-python3}
+LAB="$ROOT/lab"
 
 mkdir -p "$OUT/pcap" "$OUT/csv"
 
-# --- start the smart outstation (background, restarted before each class) --
 ECHO_PID=""
 start_outstation() {
     [ -n "$ECHO_PID" ] && kill "$ECHO_PID" 2>/dev/null
     sleep 0.3
-    $PYTHON "$ROOT/lab/outstation_smart.py" --port "$PORT" \
-        >>/tmp/outstation_smart.log 2>&1 &
+    $PYTHON "$LAB/outstation_real.py" --port "$PORT" \
+        >>/tmp/outstation_real.log 2>&1 &
     ECHO_PID=$!
     sleep 0.5
-    # quick liveness probe
     if ! python3 -c "import socket; s=socket.socket(); s.settimeout(1); s.connect(('127.0.0.1', $PORT)); s.close()" 2>/dev/null; then
-        echo "[!] outstation failed to come up; tail of log:"
-        tail -5 /tmp/outstation_smart.log
-        exit 1
+        echo "[!] outstation failed; tail of log:"; tail -5 /tmp/outstation_real.log; exit 1
     fi
 }
 trap 'kill $ECHO_PID 2>/dev/null' EXIT INT TERM
-echo "[+] starting outstation_smart on :$PORT"
+echo "[+] starting outstation_real on :$PORT"
 start_outstation
 
 run_class() {
@@ -50,50 +44,34 @@ run_class() {
     echo
     echo "==== $LABEL  (${DURATION}s) ===="
     rm -f "$PCAP" "$CSV"
-    # restart the outstation before each class so leaked fds / zombie threads
-    # don't accumulate across the whole run
     start_outstation
 
     tcpdump -i "$IFACE" -w "$PCAP" -G "$DURATION" -W 1 -nn "tcp port $PORT" \
         >/dev/null 2>&1 &
     TCPDUMP_PID=$!
     sleep 1
-
     sh -c "$CMD" || true
-
     wait $TCPDUMP_PID 2>/dev/null || true
-    echo "    pcap: $(ls -lh "$PCAP" | awk '{print $5}')"
+    echo "    pcap: $(ls -lh "$PCAP" 2>/dev/null | awk '{print $5}')"
 
-    # cicflowmeter can be slow on pcaps with hundreds of short flows
-    # (DNP3_ENUMERATE in particular). Cap it at 5 minutes per class.
     timeout 300 cicflowmeter -f "$PCAP" -c "$CSV" >/dev/null 2>&1 || \
         echo "    [!] cicflowmeter timed out / failed for $LABEL"
     LINES=$(wc -l <"$CSV" 2>/dev/null || echo 0)
     echo "    flows: $((LINES - 1))"
 }
 
-# --- per-class commands -----------------------------------------------------
-# Each command should produce a noticeable burst of traffic for $DURATION sec.
-LAB="$ROOT/lab"
-HOST=127.0.0.1
-PYHOST="--host $HOST"
+# Master session for each class. NORMAL omits --attack-fc.
+SESS="$PYTHON $LAB/master_session.py --host 127.0.0.1 --port $PORT --duration $DURATION --reconnect 5"
 
-# loop attack scripts heavily so we get hundreds of flows per window
-loop() {
-    # Vary the interval modestly across runs so attack-class IAT features
-    # don't become a single fixed value.
-    SCRIPT=$1; INTERVAL=${2:-0.3}; COUNT=${3:-200}
-    echo "$PYTHON $LAB/attacks/$SCRIPT $PYHOST --count $COUNT --interval $INTERVAL"
-}
-
-run_class NORMAL              "$PYTHON $LAB/normal.py $PYHOST --duration $DURATION --cadence 0.3 --reconnect"
-run_class COLD_RESTART        "$(loop cold_restart.py 0.25 220)"
-run_class WARM_RESTART        "$(loop warm_restart.py 0.30 200)"
-run_class DISABLE_UNSOLICITED "$(loop disable_unsolicited.py 0.20 250)"
-run_class INIT_DATA           "$(loop init_data.py 0.35 180)"
-run_class STOP_APP            "$(loop stop_app.py 0.28 210)"
-run_class DNP3_INFO           "$PYTHON $LAB/attacks/dnp3_info.py $PYHOST --rounds 40 --interval 0.25"
-run_class DNP3_ENUMERATE      "$PYTHON $LAB/attacks/dnp3_enumerate.py $PYHOST --start 0 --end 200"
+run_class NORMAL              "$SESS"
+run_class COLD_RESTART        "$SESS --attack-fc 0x0D"
+run_class WARM_RESTART        "$SESS --attack-fc 0x0E"
+run_class INIT_DATA           "$SESS --attack-fc 0x0F"
+run_class STOP_APP            "$SESS --attack-fc 0x12"
+run_class DISABLE_UNSOLICITED "$SESS --attack-fc 0x15"
+# Recon attacks still use the existing standalone scripts
+run_class DNP3_INFO           "$PYTHON $LAB/attacks/dnp3_info.py --host 127.0.0.1 --rounds 40 --interval 0.25"
+run_class DNP3_ENUMERATE      "$PYTHON $LAB/attacks/dnp3_enumerate.py --host 127.0.0.1 --start 0 --end 50"
 
 echo
 echo "[+] labelling + splitting"
