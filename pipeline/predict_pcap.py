@@ -16,6 +16,54 @@ import joblib
 import numpy as np
 import pandas as pd
 
+# Map hieulw cicflowmeter v0.4.x snake_case columns -> data_sample/ "Title Case"
+# column names that the model was trained on. Anything not in this map keeps
+# its original name.
+CIC_RENAME = {
+    "src_port": "Src Port", "dst_port": "Dst Port", "protocol": "Protocol",
+    "timestamp": "Timestamp",
+    "flow_duration": "Flow Duration",
+    "flow_byts_s": "Flow Byts/s", "flow_pkts_s": "Flow Pkts/s",
+    "fwd_pkts_s": "Fwd Pkts/s",  "bwd_pkts_s": "Bwd Pkts/s",
+    "tot_fwd_pkts": "Tot Fwd Pkts", "tot_bwd_pkts": "Tot Bwd Pkts",
+    "totlen_fwd_pkts": "TotLen Fwd Pkts", "totlen_bwd_pkts": "TotLen Bwd Pkts",
+    "fwd_pkt_len_max": "Fwd Pkt Len Max", "fwd_pkt_len_min": "Fwd Pkt Len Min",
+    "fwd_pkt_len_mean": "Fwd Pkt Len Mean", "fwd_pkt_len_std": "Fwd Pkt Len Std",
+    "bwd_pkt_len_max": "Bwd Pkt Len Max", "bwd_pkt_len_min": "Bwd Pkt Len Min",
+    "bwd_pkt_len_mean": "Bwd Pkt Len Mean", "bwd_pkt_len_std": "Bwd Pkt Len Std",
+    "pkt_len_max": "Pkt Len Max", "pkt_len_min": "Pkt Len Min",
+    "pkt_len_mean": "Pkt Len Mean", "pkt_len_std": "Pkt Len Std",
+    "pkt_len_var": "Pkt Len Var",
+    "fwd_header_len": "Fwd Header Len", "bwd_header_len": "Bwd Header Len",
+    "fwd_seg_size_min": "Fwd Seg Size Min", "fwd_act_data_pkts": "Fwd Act Data Pkts",
+    "flow_iat_mean": "Flow IAT Mean", "flow_iat_max": "Flow IAT Max",
+    "flow_iat_min": "Flow IAT Min",   "flow_iat_std": "Flow IAT Std",
+    "fwd_iat_tot": "Fwd IAT Tot", "fwd_iat_max": "Fwd IAT Max",
+    "fwd_iat_min": "Fwd IAT Min", "fwd_iat_mean": "Fwd IAT Mean",
+    "fwd_iat_std": "Fwd IAT Std",
+    "bwd_iat_tot": "Bwd IAT Tot", "bwd_iat_max": "Bwd IAT Max",
+    "bwd_iat_min": "Bwd IAT Min", "bwd_iat_mean": "Bwd IAT Mean",
+    "bwd_iat_std": "Bwd IAT Std",
+    "fwd_psh_flags": "Fwd PSH Flags", "bwd_psh_flags": "Bwd PSH Flags",
+    "fwd_urg_flags": "Fwd URG Flags", "bwd_urg_flags": "Bwd URG Flags",
+    "fin_flag_cnt": "FIN Flag Cnt", "syn_flag_cnt": "SYN Flag Cnt",
+    "rst_flag_cnt": "RST Flag Cnt", "psh_flag_cnt": "PSH Flag Cnt",
+    "ack_flag_cnt": "ACK Flag Cnt", "urg_flag_cnt": "URG Flag Cnt",
+    "ece_flag_cnt": "ECE Flag Cnt", "cwr_flag_count": "CWE Flag Count",
+    "down_up_ratio": "Down/Up Ratio", "pkt_size_avg": "Pkt Size Avg",
+    "init_fwd_win_byts": "Init Fwd Win Byts", "init_bwd_win_byts": "Init Bwd Win Byts",
+    "active_max": "Active Max", "active_min": "Active Min",
+    "active_mean": "Active Mean", "active_std": "Active Std",
+    "idle_max": "Idle Max", "idle_min": "Idle Min",
+    "idle_mean": "Idle Mean", "idle_std": "Idle Std",
+    "fwd_byts_b_avg": "Fwd Byts/b Avg", "fwd_pkts_b_avg": "Fwd Pkts/b Avg",
+    "bwd_byts_b_avg": "Bwd Byts/b Avg", "bwd_pkts_b_avg": "Bwd Pkts/b Avg",
+    "fwd_blk_rate_avg": "Fwd Blk Rate Avg", "bwd_blk_rate_avg": "Bwd Blk Rate Avg",
+    "fwd_seg_size_avg": "Fwd Seg Size Avg", "bwd_seg_size_avg": "Bwd Seg Size Avg",
+    "subflow_fwd_pkts": "Subflow Fwd Pkts", "subflow_bwd_pkts": "Subflow Bwd Pkts",
+    "subflow_fwd_byts": "Subflow Fwd Byts", "subflow_bwd_byts": "Subflow Bwd Byts",
+}
+
 
 def run_cicflowmeter(pcap: Path, out_csv: Path) -> None:
     """Invoke hieulw/cicflowmeter CLI on the pcap."""
@@ -37,9 +85,17 @@ def predict(flows_csv: Path, model_path: Path, out_csv: Path) -> pd.DataFrame:
         raise SystemExit("model.joblib must be the dict produced by export_model.py")
     pipe, le, feats = art["pipeline"], art["label_encoder"], art["features"]
 
+    if flows_csv.stat().st_size == 0:
+        print(f"[!] {flows_csv} is empty — cicflowmeter produced 0 flows.")
+        print("    Causes: pcap had no IP/TCP traffic, BPF filter excluded everything,")
+        print("            or all flows were too short to terminate within the capture.")
+        return None
     df = pd.read_csv(flows_csv)
-    # cicflowmeter and the training csv use the same human-readable column
-    # names. Anything missing -> 0; anything extra -> ignored.
+    if df.empty:
+        print(f"[!] no flow rows in {flows_csv}"); return None
+    # hieulw cicflowmeter emits snake_case; rename to the "Title Case" schema
+    # the model was trained on.
+    df = df.rename(columns=CIC_RENAME)
     missing = [c for c in feats if c not in df.columns]
     if missing:
         print(f"[!] {len(missing)} feature(s) missing from cicflowmeter output, "
@@ -89,6 +145,8 @@ def main():
         raise SystemExit(f"--skip-extract set but {flows} missing")
 
     df = predict(flows, a.model, out)
+    if df is None:
+        return
     print(f"[+] labelled -> {out}")
     summary(df)
 
