@@ -23,12 +23,25 @@ PYTHON=${PYTHON:-python3}
 
 mkdir -p "$OUT/pcap" "$OUT/csv"
 
-# --- start the smart outstation (background) -------------------------------
-echo "[+] starting outstation_smart on :$PORT"
-$PYTHON "$ROOT/lab/outstation_smart.py" --port "$PORT" >/tmp/outstation_smart.log 2>&1 &
-ECHO_PID=$!
+# --- start the smart outstation (background, restarted before each class) --
+ECHO_PID=""
+start_outstation() {
+    [ -n "$ECHO_PID" ] && kill "$ECHO_PID" 2>/dev/null
+    sleep 0.3
+    $PYTHON "$ROOT/lab/outstation_smart.py" --port "$PORT" \
+        >>/tmp/outstation_smart.log 2>&1 &
+    ECHO_PID=$!
+    sleep 0.5
+    # quick liveness probe
+    if ! python3 -c "import socket; s=socket.socket(); s.settimeout(1); s.connect(('127.0.0.1', $PORT)); s.close()" 2>/dev/null; then
+        echo "[!] outstation failed to come up; tail of log:"
+        tail -5 /tmp/outstation_smart.log
+        exit 1
+    fi
+}
 trap 'kill $ECHO_PID 2>/dev/null' EXIT INT TERM
-sleep 1
+echo "[+] starting outstation_smart on :$PORT"
+start_outstation
 
 run_class() {
     LABEL=$1; CMD=$2
@@ -37,6 +50,9 @@ run_class() {
     echo
     echo "==== $LABEL  (${DURATION}s) ===="
     rm -f "$PCAP" "$CSV"
+    # restart the outstation before each class so leaked fds / zombie threads
+    # don't accumulate across the whole run
+    start_outstation
 
     tcpdump -i "$IFACE" -w "$PCAP" -G "$DURATION" -W 1 -nn "tcp port $PORT" \
         >/dev/null 2>&1 &

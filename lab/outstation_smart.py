@@ -99,11 +99,19 @@ def main():
     a = p.parse_args()
     if a.seed is not None: random.seed(a.seed)
     s = socket.socket(); s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-    s.bind((a.host, a.port)); s.listen(16)
-    print(f"[outstation-smart] listening on {a.host}:{a.port}")
+    s.bind((a.host, a.port)); s.listen(64)
+    print(f"[outstation-smart] listening on {a.host}:{a.port}", flush=True)
+    # Serial accept loop — our test workload is one client at a time, and
+    # threading was leaking file descriptors / triggering crashes on long runs.
     while True:
-        c, addr = s.accept()
-        threading.Thread(target=serve, args=(c, addr), daemon=True).start()
+        try:
+            c, addr = s.accept()
+        except KeyboardInterrupt:
+            break
+        try:
+            serve(c, addr)
+        except Exception as e:
+            print(f"[outstation-smart] serve error: {e}", flush=True)
 
 
 if __name__ == "__main__":
