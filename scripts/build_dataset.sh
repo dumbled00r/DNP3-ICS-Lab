@@ -14,7 +14,7 @@ set -eu
 IFACE=${IFACE:-lo0}
 PORT=${PORT:-20000}
 OUT=${OUT:-/var/log/dnp3guard/dataset}
-DURATION=${DURATION:-60}
+DURATION=${DURATION:-90}            # default per-class capture window
 ROOT=$(cd "$(dirname "$0")/.." && pwd)
 PYTHON=${PYTHON:-python3}
 LAB="$ROOT/lab"
@@ -60,18 +60,21 @@ run_class() {
     echo "    flows: $((LINES - 1))"
 }
 
-# Master session for each class. NORMAL omits --attack-fc.
-SESS="$PYTHON $LAB/master_session.py --host 127.0.0.1 --port $PORT --duration $DURATION --reconnect 5"
+# Per-class tuning. Each class has a distinct combination of poll cadence,
+# reconnect period, class-0 frequency and attack injection frequency.
+# This produces measurably different flow-aggregate features per class.
+S="$PYTHON $LAB/master_session.py --host 127.0.0.1 --port $PORT --duration $DURATION"
 
-run_class NORMAL              "$SESS"
-run_class COLD_RESTART        "$SESS --attack-fc 0x0D"
-run_class WARM_RESTART        "$SESS --attack-fc 0x0E"
-run_class INIT_DATA           "$SESS --attack-fc 0x0F"
-run_class STOP_APP            "$SESS --attack-fc 0x12"
-run_class DISABLE_UNSOLICITED "$SESS --attack-fc 0x15"
-# Recon attacks still use the existing standalone scripts
-run_class DNP3_INFO           "$PYTHON $LAB/attacks/dnp3_info.py --host 127.0.0.1 --rounds 40 --interval 0.25"
-run_class DNP3_ENUMERATE      "$PYTHON $LAB/attacks/dnp3_enumerate.py --host 127.0.0.1 --start 0 --end 50"
+#                          rcn  c1   c0  atk
+run_class NORMAL              "$S --reconnect 4   --c1-period 0.012 --c0-every 30"
+run_class COLD_RESTART        "$S --reconnect 6   --c1-period 0.010 --c0-every 28 --attack-every 18 --attack-fc 0x0D"
+run_class WARM_RESTART        "$S --reconnect 5   --c1-period 0.011 --c0-every 26 --attack-every 19 --attack-fc 0x0E"
+run_class INIT_DATA           "$S --reconnect 8   --c1-period 0.020 --c0-every 40 --attack-every 35 --attack-fc 0x0F"
+run_class STOP_APP            "$S --reconnect 7   --c1-period 0.018 --c0-every 38 --attack-every 32 --attack-fc 0x12"
+run_class DISABLE_UNSOLICITED "$S --reconnect 6   --c1-period 0.013 --c0-every 25 --attack-every 17 --attack-fc 0x15"
+# Recon attacks: distinct flow shapes (no master_session at all)
+run_class DNP3_INFO           "$PYTHON $LAB/attacks/dnp3_info.py --host 127.0.0.1 --rounds 60 --interval 0.15"
+run_class DNP3_ENUMERATE      "$PYTHON $LAB/attacks/dnp3_enumerate.py --host 127.0.0.1 --start 0 --end 80"
 
 echo
 echo "[+] labelling + splitting"

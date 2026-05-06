@@ -45,6 +45,13 @@ def make_attack_frame(fc: int, seq: int) -> bytes:
     return app_request(MASTER, OUTSTATION, fc, b"", seq=seq)
 
 
+CLASS_OBJ_VARIANTS = [
+    OBJ_CLASS1,
+    b"\x3C\x02\x07\x05",                # qual 0x07 (limited count of 5)
+    b"\x3C\x02\x06" + b"\x3C\x03\x06",  # class 1 + class 2 in one frame
+]
+
+
 def session(host, port, end_t, attack_fc, c1_period, c0_every_n, attack_every_n):
     """One TCP session. Returns when end_t reached or the socket dies."""
     s = socket.create_connection((host, port), timeout=5)
@@ -53,13 +60,15 @@ def session(host, port, end_t, attack_fc, c1_period, c0_every_n, attack_every_n)
     n_polls = 0
     try:
         while time.time() < end_t:
-            # what to send next
             if attack_fc is not None and n_polls and n_polls % attack_every_n == 0:
                 pkt = make_attack_frame(attack_fc, seq)
             elif n_polls and n_polls % c0_every_n == 0:
                 pkt = app_request(MASTER, OUTSTATION, 0x01, OBJ_CLASS0, seq=seq)
             else:
-                pkt = app_request(MASTER, OUTSTATION, 0x01, OBJ_CLASS1, seq=seq)
+                # rotate small-variant class polls so packet-length features
+                # have within-class variance
+                obj = CLASS_OBJ_VARIANTS[n_polls % len(CLASS_OBJ_VARIANTS)]
+                pkt = app_request(MASTER, OUTSTATION, 0x01, obj, seq=seq)
             try:
                 s.sendall(pkt)
                 _ = s.recv(4096)
@@ -67,7 +76,8 @@ def session(host, port, end_t, attack_fc, c1_period, c0_every_n, attack_every_n)
                 break
             seq = (seq + 1) & 0x0F
             n_polls += 1
-            time.sleep(c1_period)
+            # small jitter so flow IAT features aren't a single constant
+            time.sleep(c1_period + random.uniform(-c1_period*0.3, c1_period*0.3))
     finally:
         try: s.close()
         except Exception: pass
