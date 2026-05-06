@@ -3,7 +3,9 @@
 Sends a link-layer 'Request Link Status' (ctrl 0xC9) to every dst address
 in a range and records which respond. Reconnaissance traffic.
 """
-import argparse, socket, time
+import argparse, socket, sys, time
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from dnp3 import link_frame, now
 from config import OUTSTATION_IP, OUTSTATION_PORT, MASTER_ADDR
 

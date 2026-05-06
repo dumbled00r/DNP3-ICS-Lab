@@ -6,7 +6,9 @@ forwarded so the link doesn't look obviously dead at L2.
 
 Requires: iptables, scapy. IP forwarding ON.
 """
-import argparse, os, signal, subprocess, time
+import argparse, os, signal, subprocess, sys, time
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from scapy.all import ARP, Ether, send, srp, conf
 from dnp3 import now
 from config import OUTSTATION_IP, OUTSTATION_PORT, MASTER_IP, ATTACKER_IFACE

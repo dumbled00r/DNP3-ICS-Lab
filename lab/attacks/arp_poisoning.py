@@ -4,7 +4,9 @@ Tells the master that <outstation-ip> is at attacker MAC, and vice-versa.
 Pure poisoning (no IP forwarding enabled here) — see mitm_dos.py for the
 DoS variant.
 """
-import argparse, time
+import argparse, sys, time
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from scapy.all import ARP, Ether, send, srp, conf
 from dnp3 import now
 from config import OUTSTATION_IP, MASTER_IP, ATTACKER_IFACE

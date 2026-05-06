@@ -1,5 +1,7 @@
 """COLD_RESTART — FC 0x0D. Forces a full outstation cold reboot."""
-import argparse, time
+import argparse, sys, time
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from dnp3 import app_request, send_tcp, now
 from config import OUTSTATION_IP, OUTSTATION_PORT, OUTSTATION_ADDR, MASTER_ADDR
 

@@ -7,7 +7,9 @@ Phase 2: open a fresh TCP connection to the outstation and resend the
 Run on attacker-pi after ARP-poisoning, or just on a tap. Or use
 --from-file to replay a pre-recorded hex dump.
 """
-import argparse, socket, time
+import argparse, socket, sys, time
+from pathlib import Path
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from scapy.all import sniff, TCP, Raw
 from dnp3 import now
 from config import OUTSTATION_IP, OUTSTATION_PORT, ATTACKER_IFACE
