@@ -1,23 +1,29 @@
-"""Train the chosen model on the full balanced dataset and dump artifacts
-that dnp3guard on OPNsense will load: model.joblib + features.txt.
+"""Train and export model artifacts for OPNsense.
 
-We deliberately pick a sklearn-only model (XGBoost or RandomForest) and
-bundle preprocessing into a Pipeline, so OPNsense doesn't need
-TensorFlow/Keras (heavy and painful on FreeBSD).
+Feature-selection modes:
+  --features all          (default) keep every numeric column
+  --features variance     drop only zero-variance (constant) columns
+  --features top-K        keep top K features by mutual information
+  --features smart-K      variance -> correlation prune (>0.95) -> XGB
+                          gain importance -> top K. Recommended.
+  --features importance-K train XGB once, keep top K by feature_importances_
+  --features corr-K       drop highly correlated, then top K by MI
 
-Usage:
-  python export_model.py --model xgb        # default
-  python export_model.py --model rf
+Outputs: artifacts/model.joblib + features.txt (used by dnp3guard + predict_pcap)
+
+  python export_model.py
+  python export_model.py --features smart-40
+  python export_model.py --features importance-30
 """
-import argparse, os, joblib
+import argparse, os, joblib, re
 import numpy as np
 import pandas as pd
 
-from sklearn.feature_selection import VarianceThreshold
+from sklearn.feature_selection import VarianceThreshold, mutual_info_classif
 from sklearn.preprocessing  import StandardScaler, LabelEncoder
 from sklearn.pipeline       import Pipeline
 from sklearn.ensemble       import RandomForestClassifier
-from sklearn.metrics        import accuracy_score
+from sklearn.metrics        import accuracy_score, f1_score
 from xgboost                import XGBClassifier
 
 TRAIN_CSV = r"d:\BKCSLab\DNP3\ics_lab\data_sample\CICFlowMeter_Training_Balanced.csv"
@@ -40,9 +46,89 @@ def load(path):
     return df, y
 
 
+def _drop_zero_variance(X):
+    vt = VarianceThreshold(0.0).fit(X.to_numpy())
+    return X.iloc[:, vt.get_support(indices=True)]
+
+
+def _drop_correlated(X: pd.DataFrame, threshold: float = 0.95):
+    """Drop one column from each pair with |corr| > threshold."""
+    corr = X.corr().abs()
+    upper = corr.where(np.triu(np.ones(corr.shape, dtype=bool), k=1))
+    drop = [c for c in upper.columns if any(upper[c] > threshold)]
+    return X.drop(columns=drop), drop
+
+
+def _topk_mutual_info(X, y, k):
+    y_enc = LabelEncoder().fit_transform(y)
+    scores = mutual_info_classif(X.to_numpy(), y_enc, random_state=42)
+    cols = list(X.columns)
+    order = np.argsort(scores)[::-1][:k]
+    return [cols[i] for i in sorted(order)], scores, order
+
+
+def _topk_xgb_importance(X, y, k):
+    y_enc = LabelEncoder().fit_transform(y)
+    probe = XGBClassifier(n_estimators=300, max_depth=6, learning_rate=0.1,
+                          tree_method="hist", n_jobs=-1, eval_metric="mlogloss",
+                          random_state=42, verbosity=0)
+    probe.fit(X.to_numpy(), y_enc)
+    scores = probe.feature_importances_
+    cols = list(X.columns)
+    order = np.argsort(scores)[::-1][:k]
+    return [cols[i] for i in sorted(order)], scores, order
+
+
+def select_features(Xtr: pd.DataFrame, ytr: np.ndarray, mode: str):
+    """Return (kept_columns, reason_string)."""
+    cols = list(Xtr.columns)
+    if mode == "all":
+        return cols, "kept all numeric features"
+    if mode == "variance":
+        kept = list(_drop_zero_variance(Xtr).columns)
+        return kept, f"dropped {len(cols)-len(kept)} zero-variance"
+
+    m = re.fullmatch(r"(top|importance|corr|smart)-(\d+)", mode)
+    if not m:
+        raise SystemExit(f"unknown --features mode: {mode}")
+    kind, k = m.group(1), int(m.group(2))
+    k = min(k, len(cols))
+
+    if kind == "top":
+        kept, scores, order = _topk_mutual_info(Xtr, ytr, k)
+        top5 = [(cols[i], round(float(scores[i]), 4)) for i in order[:5]]
+        return kept, f"top-{k} by mutual_info; best 5: {top5}"
+
+    if kind == "importance":
+        kept, scores, order = _topk_xgb_importance(Xtr, ytr, k)
+        top5 = [(cols[i], round(float(scores[i]), 4)) for i in order[:5]]
+        return kept, f"top-{k} by XGB importance; best 5: {top5}"
+
+    if kind == "corr":
+        X2, dropped = _drop_correlated(Xtr, 0.95)
+        kept, scores, order = _topk_mutual_info(X2, ytr, k)
+        return kept, (f"dropped {len(dropped)} correlated (>0.95) "
+                      f"then top-{k} by mutual_info")
+
+    if kind == "smart":
+        # variance -> correlation -> XGB importance
+        X2 = _drop_zero_variance(Xtr)
+        zv_dropped = len(cols) - X2.shape[1]
+        X3, corr_dropped = _drop_correlated(X2, 0.95)
+        kept, scores, order = _topk_xgb_importance(X3, ytr, k)
+        cols3 = list(X3.columns)
+        top5 = [(cols3[i], round(float(scores[i]), 4)) for i in order[:5]]
+        return kept, (f"smart pipeline: -{zv_dropped} zero-var, "
+                      f"-{len(corr_dropped)} correlated, "
+                      f"top-{k} by XGB importance; best 5: {top5}")
+    raise SystemExit(f"unhandled mode: {mode}")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", choices=["xgb", "rf"], default="xgb")
+    ap.add_argument("--features", default="all",
+                    help='"all" (default), "variance", or "top-N" (e.g. top-40)')
     args = ap.parse_args()
     os.makedirs(OUT_DIR, exist_ok=True)
 
@@ -52,12 +138,9 @@ def main():
     Xtr = Xtr[common].astype(np.float32)
     Xte = Xte[common].astype(np.float32)
 
-    # Variance threshold on numpy to avoid feature-name warning, then re-wrap.
-    vt = VarianceThreshold(0.0).fit(Xtr.to_numpy())
-    kept = [common[i] for i in vt.get_support(indices=True)]
-    Xtr = pd.DataFrame(vt.transform(Xtr.to_numpy()), columns=kept)
-    Xte = pd.DataFrame(vt.transform(Xte.to_numpy()), columns=kept)
-    print(f"kept {len(kept)}/{len(common)} features")
+    kept, reason = select_features(Xtr, ytr, args.features)
+    Xtr, Xte = Xtr[kept], Xte[kept]
+    print(f"features: {len(kept)}/{len(common)}  ({reason})")
 
     le = LabelEncoder().fit(ytr)
     ytr_enc, yte_enc = le.transform(ytr), le.transform(yte)
@@ -71,14 +154,10 @@ def main():
 
     pipe = Pipeline([("scaler", StandardScaler()), ("clf", clf)])
     pipe.fit(Xtr, ytr_enc)
-
-    # Compute accuracy manually instead of pipe.score() — avoids a sklearn>=1.6
-    # / xgboost<2.1 incompatibility in __sklearn_tags__.
     yhat = pipe.predict(Xte)
-    print(f"test acc = {accuracy_score(yte_enc, yhat):.4f}")
+    print(f"test acc = {accuracy_score(yte_enc, yhat):.4f}  "
+          f"macro-f1 = {f1_score(yte_enc, yhat, average='macro'):.4f}")
 
-    # Save as a plain dict so loading on OPNsense doesn't need any custom class
-    # to be importable (no module-shipping headaches).
     artifact = {"pipeline": pipe, "label_encoder": le, "features": kept}
     joblib.dump(artifact, os.path.join(OUT_DIR, "model.joblib"))
     with open(os.path.join(OUT_DIR, "features.txt"), "w") as f:
