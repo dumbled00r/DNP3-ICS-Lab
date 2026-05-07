@@ -41,12 +41,15 @@ run_class() {
     LABEL=$1; CMD=$2
     PCAP="$OUT/pcap/$LABEL.pcap"
     CSV="$OUT/csv/$LABEL.csv"
+    # NORMAL gets a longer capture window to match the inflated session duration
+    CAP_DUR=$DURATION
+    [ "$LABEL" = "NORMAL" ] && CAP_DUR=$((DURATION * 3))
     echo
-    echo "==== $LABEL  (${DURATION}s) ===="
+    echo "==== $LABEL  (${CAP_DUR}s) ===="
     rm -f "$PCAP" "$CSV"
     start_outstation
 
-    tcpdump -i "$IFACE" -w "$PCAP" -G "$DURATION" -W 1 -nn "tcp port $PORT" \
+    tcpdump -i "$IFACE" -w "$PCAP" -G "$CAP_DUR" -W 1 -nn "tcp port $PORT" \
         >/dev/null 2>&1 &
     TCPDUMP_PID=$!
     sleep 1
@@ -60,19 +63,24 @@ run_class() {
     echo "    flows: $((LINES - 1))"
 }
 
-# All master-session classes use IDENTICAL baseline timings; only the
-# attack FC differs. master_session.py randomizes each session's actual
-# timing within a wide range, so within-class variance covers the full
-# distribution -> the model can only discriminate by attack-frame content.
-S="$PYTHON $LAB/master_session.py --host 127.0.0.1 --port $PORT --duration $DURATION \
-   --reconnect 5 --c1-period 0.012 --c0-every 30 --attack-every 20"
+# Baseline params for attack classes — SAME timing distribution across all
+# 5 (master_session randomizes per session), only --attack-fc differs.
+# attack-every=6 ensures every short flow contains several attack frames.
+ATK="$PYTHON $LAB/master_session.py --host 127.0.0.1 --port $PORT --duration $DURATION \
+     --reconnect 5 --c1-period 0.012 --c0-every 30 --attack-every 6"
 
-run_class NORMAL              "$S"
-run_class COLD_RESTART        "$S --attack-fc 0x0D"
-run_class WARM_RESTART        "$S --attack-fc 0x0E"
-run_class INIT_DATA           "$S --attack-fc 0x0F"
-run_class STOP_APP            "$S --attack-fc 0x12"
-run_class DISABLE_UNSOLICITED "$S --attack-fc 0x15"
+# NORMAL gets 3x the duration so its flow count matches attack volume,
+# fixing the previous class imbalance (116 NORMAL vs 399 attack).
+NRM_DUR=$((DURATION * 3))
+NRM="$PYTHON $LAB/master_session.py --host 127.0.0.1 --port $PORT --duration $NRM_DUR \
+     --reconnect 5 --c1-period 0.012 --c0-every 30"
+
+run_class NORMAL              "$NRM"
+run_class COLD_RESTART        "$ATK --attack-fc 0x0D"
+run_class WARM_RESTART        "$ATK --attack-fc 0x0E"
+run_class INIT_DATA           "$ATK --attack-fc 0x0F"
+run_class STOP_APP            "$ATK --attack-fc 0x12"
+run_class DISABLE_UNSOLICITED "$ATK --attack-fc 0x15"
 # Recon attacks have intrinsically distinct shapes (different scripts)
 run_class DNP3_INFO           "$PYTHON $LAB/attacks/dnp3_info.py --host 127.0.0.1 --rounds 60 --interval 0.15"
 run_class DNP3_ENUMERATE      "$PYTHON $LAB/attacks/dnp3_enumerate.py --host 127.0.0.1 --start 0 --end 80"
