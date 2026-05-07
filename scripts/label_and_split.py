@@ -16,6 +16,15 @@ sys.path.insert(0, str(ROOT / "pipeline"))
 from predict_pcap import CIC_RENAME
 
 
+COLLAPSE_FC_INJECTION = {
+    "COLD_RESTART":        "DNP3_COMMAND_INJECTION",
+    "WARM_RESTART":        "DNP3_COMMAND_INJECTION",
+    "INIT_DATA":           "DNP3_COMMAND_INJECTION",
+    "STOP_APP":            "DNP3_COMMAND_INJECTION",
+    "DISABLE_UNSOLICITED": "DNP3_COMMAND_INJECTION",
+}
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--csv-dir", required=True, type=Path,
@@ -23,6 +32,10 @@ def main():
     ap.add_argument("--out-dir", required=True, type=Path)
     ap.add_argument("--test-frac", type=float, default=0.2)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--collapse", action="store_true",
+                    help="merge COLD/WARM/INIT/STOP/DISABLE_UNS -> "
+                         "DNP3_COMMAND_INJECTION (FC-level discrimination is "
+                         "infeasible at flow features; this is the honest split)")
     a = ap.parse_args()
 
     frames = []
@@ -35,9 +48,10 @@ def main():
         if df.empty:
             print(f"  skip {csv.name} (no rows)"); continue
         df = df.rename(columns=CIC_RENAME)
-        df["Label"] = label
+        effective = COLLAPSE_FC_INJECTION.get(label, label) if a.collapse else label
+        df["Label"] = effective
         frames.append(df)
-        print(f"  {label:<22} {len(df):>5} flows")
+        print(f"  {label:<22} {len(df):>5} flows -> {effective}")
 
     if not frames:
         raise SystemExit("no CSVs with rows in --csv-dir")
