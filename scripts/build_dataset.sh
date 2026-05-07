@@ -60,19 +60,20 @@ run_class() {
     echo "    flows: $((LINES - 1))"
 }
 
-# Per-class tuning. Each class has a distinct combination of poll cadence,
-# reconnect period, class-0 frequency and attack injection frequency.
-# This produces measurably different flow-aggregate features per class.
-S="$PYTHON $LAB/master_session.py --host 127.0.0.1 --port $PORT --duration $DURATION"
+# All master-session classes use IDENTICAL baseline timings; only the
+# attack FC differs. master_session.py randomizes each session's actual
+# timing within a wide range, so within-class variance covers the full
+# distribution -> the model can only discriminate by attack-frame content.
+S="$PYTHON $LAB/master_session.py --host 127.0.0.1 --port $PORT --duration $DURATION \
+   --reconnect 5 --c1-period 0.012 --c0-every 30 --attack-every 20"
 
-#                          rcn  c1   c0  atk
-run_class NORMAL              "$S --reconnect 4   --c1-period 0.012 --c0-every 30"
-run_class COLD_RESTART        "$S --reconnect 6   --c1-period 0.010 --c0-every 28 --attack-every 18 --attack-fc 0x0D"
-run_class WARM_RESTART        "$S --reconnect 5   --c1-period 0.011 --c0-every 26 --attack-every 19 --attack-fc 0x0E"
-run_class INIT_DATA           "$S --reconnect 8   --c1-period 0.020 --c0-every 40 --attack-every 35 --attack-fc 0x0F"
-run_class STOP_APP            "$S --reconnect 7   --c1-period 0.018 --c0-every 38 --attack-every 32 --attack-fc 0x12"
-run_class DISABLE_UNSOLICITED "$S --reconnect 6   --c1-period 0.013 --c0-every 25 --attack-every 17 --attack-fc 0x15"
-# Recon attacks: distinct flow shapes (no master_session at all)
+run_class NORMAL              "$S"
+run_class COLD_RESTART        "$S --attack-fc 0x0D"
+run_class WARM_RESTART        "$S --attack-fc 0x0E"
+run_class INIT_DATA           "$S --attack-fc 0x0F"
+run_class STOP_APP            "$S --attack-fc 0x12"
+run_class DISABLE_UNSOLICITED "$S --attack-fc 0x15"
+# Recon attacks have intrinsically distinct shapes (different scripts)
 run_class DNP3_INFO           "$PYTHON $LAB/attacks/dnp3_info.py --host 127.0.0.1 --rounds 60 --interval 0.15"
 run_class DNP3_ENUMERATE      "$PYTHON $LAB/attacks/dnp3_enumerate.py --host 127.0.0.1 --start 0 --end 80"
 

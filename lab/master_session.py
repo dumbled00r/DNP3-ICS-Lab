@@ -107,17 +107,22 @@ def main():
     end_total = time.time() + a.duration
     n_sessions = 0
     while time.time() < end_total:
-        end_sess = min(end_total, time.time() + a.reconnect
-                       + random.uniform(-a.reconnect*0.2, a.reconnect*0.2))
+        # randomize THIS session's params so flows within a class have a
+        # broad distribution of timing/volume — the model is then forced to
+        # learn from the attack frame content, not orchestration metadata.
+        sess_recon = max(2.0, random.uniform(a.reconnect * 0.3, a.reconnect * 2.0))
+        sess_c1    = random.uniform(a.c1_period * 0.5, a.c1_period * 2.5)
+        sess_c0    = max(10, int(a.c0_every    * random.uniform(0.5, 2.0)))
+        sess_atk   = max(8,  int(a.attack_every* random.uniform(0.5, 2.0)))
+        end_sess = min(end_total, time.time() + sess_recon)
         try:
-            session(a.host, a.port, end_sess, fc,
-                    a.c1_period, a.c0_every, a.attack_every)
+            session(a.host, a.port, end_sess, fc, sess_c1, sess_c0, sess_atk)
         except OSError as e:
             print(f"[master_session] connect failed: {e}; retry in 1s", flush=True)
             time.sleep(1.0)
             continue
         n_sessions += 1
-        time.sleep(0.05)        # tiny gap between sessions so flows clearly split
+        time.sleep(0.05)
     print(f"[master_session] done; {n_sessions} sessions", flush=True)
 
 
