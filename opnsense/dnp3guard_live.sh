@@ -9,6 +9,10 @@
 #   DNP3_LOG     default: /var/log/dnp3guard/verdicts.log
 
 set -eu
+# daemon(8) starts with a minimal PATH; make sure pip-installed scripts and
+# python's bin dir are findable.
+PATH="/usr/local/bin:/usr/local/sbin:/usr/bin:/usr/sbin:/bin:/sbin:$PATH"
+export PATH
 IFACE=${DNP3_IFACE:-vmx0}
 CSV=${DNP3_CSV:-/var/log/dnp3guard/live.csv}
 MODEL=${DNP3_MODEL:-/usr/local/dnp3guard/model.joblib}
@@ -21,7 +25,8 @@ mkdir -p "$(dirname "$CSV")" "$(dirname "$VLOG")"
 # clean up child on exit/signal
 trap 'kill $CFM_PID 2>/dev/null; exit 0' INT TERM HUP
 
-cicflowmeter -i "$IFACE" -c "$CSV" >>/var/log/dnp3guard/cicflowmeter.log 2>&1 &
+CICFLOWMETER=${CICFLOWMETER:-$(command -v cicflowmeter || echo /usr/local/bin/cicflowmeter)}
+"$CICFLOWMETER" -i "$IFACE" -c "$CSV" >>/var/log/dnp3guard/cicflowmeter.log 2>&1 &
 CFM_PID=$!
 echo "[dnp3guard] cicflowmeter pid=$CFM_PID iface=$IFACE csv=$CSV"
 
