@@ -18,6 +18,8 @@ CSV=${DNP3_CSV:-/var/log/dnp3guard/live.csv}
 MODEL=${DNP3_MODEL:-/usr/local/dnp3guard/model.joblib}
 VLOG=${DNP3_LOG:-/var/log/dnp3guard/verdicts.log}
 PYTHON=${DNP3_PYTHON:-/usr/local/bin/python3}
+EVE_JSON=${DNP3_EVE:-/var/log/suricata/eve.json}
+EVE_TTL=${DNP3_EVE_TTL:-60}
 
 mkdir -p "$(dirname "$CSV")" "$(dirname "$VLOG")"
 : >"$CSV"
@@ -31,5 +33,7 @@ CFM_PID=$!
 echo "[dnp3guard] cicflowmeter pid=$CFM_PID iface=$IFACE csv=$CSV"
 
 # tailer in foreground — daemon(8) reaps it for us
+EVE_FLAGS=""
+[ -f "$EVE_JSON" ] && EVE_FLAGS="--eve-json $EVE_JSON --eve-ttl $EVE_TTL"
 exec "$PYTHON" /usr/local/dnp3guard/live_predict.py \
-    --csv "$CSV" --model "$MODEL" --log "$VLOG"
+    --csv "$CSV" --model "$MODEL" --log "$VLOG" $EVE_FLAGS

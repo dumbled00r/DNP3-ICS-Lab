@@ -1,0 +1,97 @@
+# DNP3Guard — Suricata signature rules
+#
+# Deployment: copy to /usr/local/etc/suricata/rules/dnp3guard.rules
+# Then add the filename to suricata.yaml under rule-files:, reload Suricata.
+#
+# OPNsense GUI path:
+#   Services -> Intrusion Detection -> Administration -> Rules tab
+#   Or: Services -> Intrusion Detection -> Administration -> Download (add custom)
+#
+# IPS mode (recommended): Suricata must be configured in inline/netmap mode so
+# "drop" rules actually block.  In pure IDS mode the rules fire alerts only.
+#
+# These rules handle *known* attack FCs precisely and quickly (sub-ms).
+# The AI flow classifier (live_predict.py) covers novel/subtle anomalies that
+# don't match a specific FC signature.
+#
+# SID range: 9100001 - 9100099  (local/custom range, safe from ET/rule-set clash)
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# 1.  Command-injection FCs  (DROP — destructive state changes)
+# ---------------------------------------------------------------------------
+
+drop dnp3 any any -> any 20000 (msg:"DNP3 COMMAND_INJECTION cold_restart";
+    flow:established,to_server;
+    dnp3_func:cold_restart;
+    classtype:attempted-dos;
+    sid:9100001; rev:2;)
+
+drop dnp3 any any -> any 20000 (msg:"DNP3 COMMAND_INJECTION warm_restart";
+    flow:established,to_server;
+    dnp3_func:warm_restart;
+    classtype:attempted-dos;
+    sid:9100002; rev:2;)
+
+drop dnp3 any any -> any 20000 (msg:"DNP3 COMMAND_INJECTION initialize_data";
+    flow:established,to_server;
+    dnp3_func:initialize_data;
+    classtype:attempted-dos;
+    sid:9100003; rev:2;)
+
+drop dnp3 any any -> any 20000 (msg:"DNP3 COMMAND_INJECTION stop_appl";
+    flow:established,to_server;
+    dnp3_func:stop_appl;
+    classtype:attempted-dos;
+    sid:9100004; rev:2;)
+
+drop dnp3 any any -> any 20000 (msg:"DNP3 COMMAND_INJECTION disable_unsolicited";
+    flow:established,to_server;
+    dnp3_func:disable_unsolicited;
+    classtype:attempted-dos;
+    sid:9100005; rev:2;)
+
+drop dnp3 any any -> any 20000 (msg:"DNP3 COMMAND_INJECTION initialize_application";
+    flow:established,to_server;
+    dnp3_func:initialize_application;
+    classtype:attempted-dos;
+    sid:9100006; rev:2;)
+
+# ---------------------------------------------------------------------------
+# 2.  Reconnaissance — alert only (let AI score the flow too)
+# ---------------------------------------------------------------------------
+
+# Rapid new connection attempts => likely enumeration scan
+alert tcp any any -> any 20000 (msg:"DNP3 ENUMERATE rapid connections";
+    flow:stateless;
+    flags:S;
+    threshold: type both, track by_src, count 8, seconds 10;
+    classtype:network-scan;
+    sid:9100020; rev:2;)
+
+# Large class-0 read on an unexpected source (info gathering)
+alert dnp3 any any -> any 20000 (msg:"DNP3 INFO class-0 read";
+    flow:established,to_server;
+    dnp3_func:read;
+    classtype:policy-violation;
+    sid:9100021; rev:2;)
+
+# ---------------------------------------------------------------------------
+# 3.  Non-standard ports  (flag DNP3 traffic not on 20000)
+# ---------------------------------------------------------------------------
+
+alert tcp any any -> any !20000 (msg:"DNP3 on non-standard port";
+    app-layer-protocol:dnp3;
+    classtype:policy-violation;
+    sid:9100030; rev:1;)
+
+# ---------------------------------------------------------------------------
+# 4.  Flood / amplification guard
+# ---------------------------------------------------------------------------
+
+# More than 60 DNP3 requests per minute from a single source
+alert dnp3 any any -> any 20000 (msg:"DNP3 request flood";
+    flow:established,to_server;
+    threshold: type threshold, track by_src, count 60, seconds 60;
+    classtype:attempted-dos;
+    sid:9100040; rev:1;)

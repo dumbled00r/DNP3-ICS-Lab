@@ -20,6 +20,15 @@ verify_tls     = false
 alias_name     = dnp3_blocklist
 block_ttl_sec  = 3600            # auto-expire blocks; 0 = permanent
 
+[suricata]
+# Path to Suricata's eve.json.  live_predict.py tails this to suppress
+# AI alerts for flows already caught by Suricata signature rules.
+# Set to empty string to disable correlation (AI alerts will show "ALERT"
+# instead of "ALERT-AI" / "SUPPRESS").
+eve_json       = /var/log/suricata/eve.json
+# Seconds to keep a Suricata alert in the 5-tuple cache.
+eve_ttl        = 60
+
 [log]
-path           = /var/log/dnp3guard.log
+path           = /var/log/dnp3guard/verdicts.log
 level          = INFO

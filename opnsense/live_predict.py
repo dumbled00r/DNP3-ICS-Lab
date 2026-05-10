@@ -123,6 +123,11 @@ def main():
     ap.add_argument("--benign", default="NORMAL")
     ap.add_argument("--port", type=int, default=20000,
                     help="only score flows touching this TCP port (0=any)")
+    ap.add_argument("--eve-json", default=None,
+                    help="Suricata eve.json path; AI alerts on flows already "
+                         "alerted on by Suricata are logged as SUPPRESSED")
+    ap.add_argument("--eve-ttl", type=float, default=60.0,
+                    help="seconds to keep Suricata alerts in the lookup cache")
     a = ap.parse_args()
 
     a.log.parent.mkdir(parents=True, exist_ok=True)
@@ -130,6 +135,16 @@ def main():
     pipe, le, feats = load_model(a.model)
     logging.info("model loaded; %d features", len(feats))
     logging.info("watching %s", a.csv)
+
+    eve = None
+    if a.eve_json:
+        try:
+            from eve_watcher import EveWatcher
+        except ImportError:
+            sys.path.insert(0, str(Path(__file__).resolve().parent))
+            from eve_watcher import EveWatcher
+        eve = EveWatcher(a.eve_json, ttl=a.eve_ttl)
+        logging.info("EveWatcher tailing %s (ttl=%.0fs)", a.eve_json, a.eve_ttl)
 
     n = 0
     n_alerts = 0
@@ -147,14 +162,24 @@ def main():
             logging.exception("predict failed: %s", e)
             continue
         n += 1
-        src = row.get("src_ip", "?")
-        dst = row.get("dst_ip", "?")
+        src   = row.get("src_ip", "?")
+        dst   = row.get("dst_ip", "?")
+        sp    = row.get("src_port", "?")
+        dp    = row.get("dst_port", "?")
         if verdict != a.benign:
-            n_alerts += 1
-            logging.warning("ALERT %s %s->%s  flow=%d alerts=%d",
-                            verdict, src, dst, n, n_alerts)
+            covered = eve.lookup(src, sp, dst, dp) if eve else None
+            if covered:
+                sig_id, sig_nm = covered
+                logging.info("SUPPRESS AI=%s sig=%d (%s) %s:%s->%s:%s",
+                             verdict, sig_id, sig_nm, src, sp, dst, dp)
+            else:
+                n_alerts += 1
+                tag = "ALERT-AI" if eve else "ALERT"
+                logging.warning("%s %s %s:%s->%s:%s  flow=%d alerts=%d",
+                                tag, verdict, src, sp, dst, dp, n, n_alerts)
         else:
-            logging.info("ok    %s %s->%s  flow=%d", verdict, src, dst, n)
+            logging.info("ok    %s %s:%s->%s:%s  flow=%d",
+                         verdict, src, sp, dst, dp, n)
 
 
 if __name__ == "__main__":
