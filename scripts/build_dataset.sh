@@ -102,13 +102,19 @@ run_class() {
         *)         start_outstation;;
     esac
 
-    tcpdump -i "$IFACE" -w "$PCAP" -G "$CAP_DUR" -W 1 -nn "tcp port $PORT" \
+    # Open-ended capture (no -G); killed as soon as the master exits.
+    # This avoids blocking the full CAP_DUR when attacks finish early
+    # (e.g. DNP3_ENUMERATE completes in ~10 s, cap_dur would waste 80 s).
+    tcpdump -i "$IFACE" -w "$PCAP" -nn "tcp port $PORT" \
         >/dev/null 2>&1 &
     TCPDUMP_PID=$!
     sleep 1
 
     sh -c "$CMD" || true
-    wait $TCPDUMP_PID 2>/dev/null || true
+    # 2 s grace for trailing responses, then kill tcpdump immediately.
+    sleep 2
+    kill "$TCPDUMP_PID" 2>/dev/null || true
+    wait "$TCPDUMP_PID" 2>/dev/null || true
 
     SZ=$(ls -lh "$PCAP" 2>/dev/null | awk '{print $5}'); echo "  pcap: ${SZ:-0}"
 
