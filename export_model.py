@@ -61,6 +61,15 @@ COLLAPSE_FC_INJECTION = {
     "DISABLE_UNSOLICITED": "DNP3_COMMAND_INJECTION",
 }
 
+# Classes handled by pkt_inspect.py (payload path).  In --behavioral-only mode
+# these are dropped from training so the flow-ML model focuses on the 3
+# behavioral anomalies (MITM_DOS, REPLAY, ARP_POISONING) + NORMAL.
+PAYLOAD_CLASSES = frozenset({
+    "COLD_RESTART", "WARM_RESTART", "INIT_DATA", "STOP_APP",
+    "DISABLE_UNSOLICITED", "DNP3_COMMAND_INJECTION",
+    "DNP3_INFO", "DNP3_ENUMERATE", "DNP3_RECON",
+})
+
 TRAIN_CSV_DEFAULT = str(_ROOT / "data_sample" / "CICFlowMeter_Training_Balanced.csv")
 TEST_CSV_DEFAULT  = str(_ROOT / "data_sample" / "CICFlowMeter_Testing_Balanced.csv")
 OUT_DIR_DEFAULT   = str(_ROOT / "artifacts")
@@ -72,8 +81,9 @@ DROP_COLS = {"Unnamed: 0.1", "Unnamed: 0", "Flow ID", "Src IP", "Dst IP", "Times
 # Data loading
 # ---------------------------------------------------------------------------
 
-def load_one(path: str, collapse: bool) -> tuple[pd.DataFrame, np.ndarray]:
-    """Load a single CSV, normalise column names, optionally collapse labels."""
+def load_one(path: str, collapse: bool,
+             behavioral_only: bool = False) -> tuple[pd.DataFrame, np.ndarray]:
+    """Load a single CSV, normalise column names, optionally collapse/filter labels."""
     df = pd.read_csv(path)
     df = df.rename(columns=CIC_RENAME)
     for c in list(DROP_COLS):
@@ -84,17 +94,22 @@ def load_one(path: str, collapse: bool) -> tuple[pd.DataFrame, np.ndarray]:
     y = df.pop("Label").astype(str)
     if collapse:
         y = y.map(lambda v: COLLAPSE_FC_INJECTION.get(v, v))
+    if behavioral_only:
+        mask = ~y.isin(PAYLOAD_CLASSES)
+        df = df[mask].reset_index(drop=True)
+        y  = y[mask].reset_index(drop=True)
     df = df.select_dtypes(include=[np.number])
     df.replace([np.inf, -np.inf], np.nan, inplace=True)
     return df, y.values
 
 
-def load_multi(paths: list[str], collapse: bool, seed: int = 42) -> tuple[pd.DataFrame, np.ndarray]:
+def load_multi(paths: list[str], collapse: bool, seed: int = 42,
+               behavioral_only: bool = False) -> tuple[pd.DataFrame, np.ndarray]:
     """Load and concatenate multiple CSVs; shuffle the combined result."""
     frames, labels = [], []
     for p in paths:
         try:
-            df, y = load_one(p, collapse)
+            df, y = load_one(p, collapse, behavioral_only=behavioral_only)
         except Exception as e:
             print(f"[warn] skip {p}: {e}", file=sys.stderr)
             continue
@@ -216,16 +231,26 @@ def main():
     ap.add_argument("--collapse", action="store_true",
                     help="merge COLD/WARM/INIT/STOP/DISABLE_UNS -> "
                          "DNP3_COMMAND_INJECTION in all datasets")
+    ap.add_argument("--behavioral-only", action="store_true",
+                    help="drop payload-detectable classes (FC-injection, recon) and "
+                         "train only on NORMAL/MITM_DOS/REPLAY/ARP_POISONING; "
+                         "pairs with pkt_inspect.py for full multimodal coverage")
     ap.add_argument("--seed", type=int, default=42)
     args = ap.parse_args()
     os.makedirs(args.out, exist_ok=True)
 
+    bo = getattr(args, "behavioral_only", False)
+    if bo:
+        print("\n[mode] behavioral-only: dropping payload-detectable classes")
+
     print("\n=== Loading training data ===")
-    Xtr, ytr = load_multi(args.train, collapse=args.collapse, seed=args.seed)
+    Xtr, ytr = load_multi(args.train, collapse=args.collapse, seed=args.seed,
+                          behavioral_only=bo)
     print(f"  total training rows: {len(Xtr)}")
 
     print("\n=== Loading test data ===")
-    Xte, yte = load_multi(args.test, collapse=args.collapse, seed=args.seed)
+    Xte, yte = load_multi(args.test, collapse=args.collapse, seed=args.seed,
+                          behavioral_only=bo)
     print(f"  total test rows:     {len(Xte)}")
 
     # align columns to the intersection present in both train and test

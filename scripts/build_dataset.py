@@ -93,15 +93,29 @@ def wait_port(host: str, port: int, timeout: float = 10.0) -> bool:
 # Packet capture (tcpdump preferred, scapy fallback for Windows)
 # ---------------------------------------------------------------------------
 
-def _capture_tcpdump(iface: str, port: int, duration: int, pcap: Path) -> None:
-    subprocess.run(
-        [TCPDUMP, "-i", iface, "-w", str(pcap),
-         "-G", str(duration), "-W", "1", "-nn",
-         f"tcp port {port}"],
+def _capture_tcpdump(iface: str, port: int, duration: int, pcap: Path,
+                     stop: threading.Event) -> None:
+    # Use open-ended capture (-i iface -w file) and kill when stop fires,
+    # rather than -G duration which cannot be interrupted early.
+    proc = subprocess.Popen(
+        [TCPDUMP, "-i", iface, "-w", str(pcap), "-nn", f"tcp port {port}"],
         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    end = time.monotonic() + duration
+    while time.monotonic() < end:
+        if stop.wait(timeout=0.5):
+            break
+    try:
+        proc.terminate()
+        proc.wait(timeout=5)
+    except (subprocess.TimeoutExpired, OSError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
 
 
-def _capture_scapy(iface: str, port: int, duration: float, pcap: Path) -> None:
+def _capture_scapy(iface: str, port: int, duration: float, pcap: Path,
+                   stop: threading.Event) -> None:
     try:
         from scapy.all import AsyncSniffer, wrpcap
     except ImportError:
@@ -110,16 +124,20 @@ def _capture_scapy(iface: str, port: int, duration: float, pcap: Path) -> None:
             "Also install Npcap from https://npcap.com and run as Administrator.")
     sn = AsyncSniffer(iface=iface, filter=f"tcp port {port}", store=True)
     sn.start()
-    time.sleep(duration)
+    end = time.monotonic() + duration
+    while time.monotonic() < end:
+        if stop.wait(timeout=0.5):
+            break
     sn.stop()
     wrpcap(str(pcap), sn.results or [])
 
 
-def capture_pcap(iface: str, port: int, duration: int, pcap: Path) -> None:
+def capture_pcap(iface: str, port: int, duration: int, pcap: Path,
+                 stop: threading.Event) -> None:
     if TCPDUMP:
-        _capture_tcpdump(iface, port, duration, pcap)
+        _capture_tcpdump(iface, port, duration, pcap, stop)
     else:
-        _capture_scapy(iface, port, float(duration), pcap)
+        _capture_scapy(iface, port, float(duration), pcap, stop)
 
 
 # ---------------------------------------------------------------------------
@@ -212,7 +230,7 @@ def build_class_list(python: str, port: int, dur: int) -> list[tuple]:
           "--host","127.0.0.1","--rounds","60","--interval","0.15"],          dur),
         ("DNP3_ENUMERATE",      "real",
          [python, str(LAB/"attacks"/"dnp3_enumerate.py"),
-          "--host","127.0.0.1","--start","0","--end","80"],                   dur),
+          "--host","127.0.0.1","--start","0","--end","80","--timeout","0.3"], dur),
         ("MITM_DOS",            "blackhole", MITM,                            dur),
         ("REPLAY",              "real",      REPLAY,                          dur),
         ("ARP_POISONING",       "relay",     ARP,                             dur),
@@ -275,8 +293,9 @@ def run_class(label: str, ost_mode: str, master_cmd: list[str], cap_dur: int,
             return
 
     # ---- start capture in a background thread --------------------------------
+    cap_stop = threading.Event()
     cap_thread = threading.Thread(
-        target=capture_pcap, args=(iface, port, cap_dur, pcap), daemon=True)
+        target=capture_pcap, args=(iface, port, cap_dur, pcap, cap_stop), daemon=True)
     time.sleep(0.3)
     cap_thread.start()
     time.sleep(0.5)
@@ -284,7 +303,12 @@ def run_class(label: str, ost_mode: str, master_cmd: list[str], cap_dur: int,
     # ---- run attack / master -------------------------------------------------
     master = start_proc(master_cmd)
     master.wait()
-    cap_thread.join(timeout=cap_dur + 15)
+    # Give capture 2 extra seconds for trailing responses, then stop it.
+    # This avoids waiting the full cap_dur when the attack finishes early
+    # (e.g. DNP3_ENUMERATE completes in ~10s but cap_dur would be 90s).
+    time.sleep(2)
+    cap_stop.set()
+    cap_thread.join(timeout=15)
 
     # ---- stop outstation(s) --------------------------------------------------
     kill_proc(ost_main)
