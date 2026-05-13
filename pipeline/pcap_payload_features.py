@@ -57,6 +57,48 @@ from dnp3_parse import parse_frames, ATTACK_FC, LINK_STATUS_CTRL
 # Minimal pcap + Ethernet/IP/TCP reader (no scapy dependency)
 # ---------------------------------------------------------------------------
 
+def _ip_start_for_packet(data: bytes, link_type: int) -> Optional[int]:
+    """Return offset where the IPv4 header starts, or None to skip the packet.
+
+    Handles:
+      0   DLT_NULL      BSD loopback (4-byte AF header, AF_INET=2 LE on x86)
+      1   DLT_EN10MB    Ethernet (14 bytes, +4 for 802.1Q)
+      12  DLT_RAW       Raw IP (no link header)
+      101 DLT_RAW       Raw IP (Linux raw socket variant)
+      113 DLT_LINUX_SLL Linux cooked capture (16-byte header)
+    """
+    if link_type == 0:                          # BSD NULL / loopback
+        if len(data) < 4:
+            return None
+        af = struct.unpack("<I", data[:4])[0]   # host byte order (LE on x86)
+        if af != 2:                             # AF_INET
+            return None
+        return 4
+    if link_type == 1:                          # Ethernet
+        if len(data) < 14:
+            return None
+        eth_type = struct.unpack(">H", data[12:14])[0]
+        ip_start = 14
+        if eth_type == 0x8100:                  # 802.1Q VLAN tag
+            if len(data) < 18:
+                return None
+            eth_type = struct.unpack(">H", data[16:18])[0]
+            ip_start = 18
+        if eth_type != 0x0800:
+            return None
+        return ip_start
+    if link_type in (12, 101):                  # Raw IP
+        return 0
+    if link_type == 113:                        # Linux cooked (SLL)
+        if len(data) < 16:
+            return None
+        eth_type = struct.unpack(">H", data[14:16])[0]
+        if eth_type != 0x0800:
+            return None
+        return 16
+    return None
+
+
 def _iter_tcp_payloads(path: Path):
     """Yield (src_ip, src_port, dst_ip, dst_port, payload_bytes) per TCP pkt."""
     with open(path, "rb") as f:
@@ -64,7 +106,13 @@ def _iter_tcp_payloads(path: Path):
         if len(hdr) < 24:
             return
         magic = struct.unpack("<I", hdr[:4])[0]
-        bo = "<" if magic == 0xa1b2c3d4 else ">"
+        if magic == 0xa1b2c3d4:
+            bo = "<"
+        elif magic == 0xd4c3b2a1:
+            bo = ">"
+        else:
+            return  # pcapng or unknown — not supported
+        link_type = struct.unpack(bo + "I", hdr[20:24])[0]
 
         while True:
             rec = f.read(16)
@@ -75,14 +123,8 @@ def _iter_tcp_payloads(path: Path):
             if len(data) < incl_len:
                 break
 
-            # Ethernet
-            if len(data) < 14:
-                continue
-            eth_type = struct.unpack(">H", data[12:14])[0]
-            ip_start = 14
-            if eth_type == 0x8100:          # 802.1Q VLAN
-                ip_start += 4
-            if eth_type not in (0x0800, 0x8100):
+            ip_start = _ip_start_for_packet(data, link_type)
+            if ip_start is None:
                 continue
 
             # IPv4
