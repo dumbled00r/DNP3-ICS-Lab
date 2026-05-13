@@ -11,6 +11,7 @@ Usage:
 from __future__ import annotations
 import argparse, csv, logging, os, sys, time, threading
 from logging.handlers import RotatingFileHandler
+csv.field_size_limit(10 * 1024 * 1024)  # cicflowmeter rows can exceed default 131 KB
 from pathlib import Path
 
 import joblib
