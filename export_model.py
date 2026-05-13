@@ -315,10 +315,28 @@ def train_payload_model(args) -> None:
 
     Input CSVs are produced by pipeline/pcap_payload_features.py.
     Output: artifacts/payload_model.joblib + payload_features.txt
+
+    Only classes in PAYLOAD_CLASSES + NORMAL are kept.
+    Behavioral attacks (MITM_DOS, ARP_POISONING, REPLAY) are excluded:
+    their payload features are indistinguishable from NORMAL; they are
+    handled exclusively by the flow ML model.
     """
     print("\n=== Payload model ===")
     Xtr, ytr = load_multi(args.payload_train, collapse=False, seed=args.seed)
     Xte, yte = load_multi(args.payload_test,  collapse=False, seed=args.seed)
+
+    # Keep only classes with meaningful payload-level signatures.
+    # Behavioral attacks (MITM_DOS, ARP_POISONING, REPLAY) have payload
+    # features indistinguishable from NORMAL; the flow model handles them.
+    _keep = PAYLOAD_CLASSES | {"NORMAL"}
+    all_seen = set(np.unique(np.concatenate([ytr, yte])))
+    excluded  = sorted(all_seen - _keep)
+    if excluded:
+        print(f"  excluded (behavioral — use flow model): {excluded}")
+    tr_mask = pd.Series(ytr).isin(_keep).values
+    te_mask = pd.Series(yte).isin(_keep).values
+    Xtr, ytr = Xtr[tr_mask].reset_index(drop=True), ytr[tr_mask]
+    Xte, yte = Xte[te_mask].reset_index(drop=True), yte[te_mask]
     print(f"  train rows: {len(Xtr)}  test rows: {len(Xte)}")
 
     common = [c for c in Xtr.columns if c in Xte.columns]
