@@ -34,6 +34,7 @@ PORT=${DNP3_PORT:-20000}
 SCAN_THRESH=${DNP3_SCAN_THRESHOLD:-40}
 SCAN_WIN=${DNP3_SCAN_WINDOW:-10}
 DNP3GUARD_DIR=${DNP3GUARD_DIR:-/usr/local/dnp3guard}
+PAYLOAD_MODEL=${DNP3_PAYLOAD_MODEL:-$DNP3GUARD_DIR/payload_model.joblib}
 
 mkdir -p "$(dirname "$CSV")" "$(dirname "$VLOG")"
 : >"$CSV"
@@ -49,12 +50,12 @@ _cleanup() {
 trap '_cleanup' INT TERM HUP
 
 # ---- payload inspector (runs in background) ---------------------------------
-"$PYTHON" "$DNP3GUARD_DIR/pkt_inspect.py" \
-    --iface "$IFACE" \
-    --port  "$PORT" \
-    --log   "$VLOG" \
-    --scan-threshold "$SCAN_THRESH" \
-    --scan-window    "$SCAN_WIN" \
+PKT_ARGS="--iface $IFACE --port $PORT --log $VLOG \
+    --scan-threshold $SCAN_THRESH --scan-window $SCAN_WIN"
+[ -f "$PAYLOAD_MODEL" ] && PKT_ARGS="$PKT_ARGS --payload-model $PAYLOAD_MODEL"
+
+# shellcheck disable=SC2086
+"$PYTHON" "$DNP3GUARD_DIR/pkt_inspect.py" $PKT_ARGS \
     >>/var/log/dnp3guard/pkt_inspect.log 2>&1 &
 PKT_PID=$!
 echo "[dnp3guard] pkt_inspect pid=$PKT_PID iface=$IFACE port=$PORT"

@@ -306,5 +306,75 @@ def main():
     print(f"saved -> {out_feats}")
 
 
+# ---------------------------------------------------------------------------
+# Payload model training (called from train_payload_model())
+# ---------------------------------------------------------------------------
+
+def train_payload_model(args) -> None:
+    """Train an XGB/RF model on per-flow DNP3 payload features.
+
+    Input CSVs are produced by pipeline/pcap_payload_features.py.
+    Output: artifacts/payload_model.joblib + payload_features.txt
+    """
+    print("\n=== Payload model ===")
+    Xtr, ytr = load_multi(args.payload_train, collapse=False, seed=args.seed)
+    Xte, yte = load_multi(args.payload_test,  collapse=False, seed=args.seed)
+    print(f"  train rows: {len(Xtr)}  test rows: {len(Xte)}")
+
+    common = [c for c in Xtr.columns if c in Xte.columns]
+    Xtr = Xtr[common].astype(np.float32)
+    Xte = Xte[common].astype(np.float32)
+
+    kept, reason = select_features(Xtr, ytr, args.features)
+    Xtr, Xte = Xtr[kept], Xte[kept]
+    print(f"  features: {len(kept)}  ({reason})")
+
+    all_labels = np.concatenate([ytr, yte])
+    le = LabelEncoder().fit(all_labels)
+    print(f"  classes ({len(le.classes_)}): {list(le.classes_)}")
+
+    if args.model == "xgb":
+        clf = XGBClassifier(n_estimators=400, max_depth=8, learning_rate=0.1,
+                            tree_method="hist", n_jobs=-1, eval_metric="mlogloss",
+                            random_state=args.seed, verbosity=0)
+    else:
+        clf = RandomForestClassifier(n_estimators=400, n_jobs=-1,
+                                     random_state=args.seed)
+
+    pipe = Pipeline([("scaler", StandardScaler()), ("clf", clf)])
+    pipe.fit(Xtr, le.transform(ytr))
+
+    yhat = pipe.predict(Xte)
+    yte_enc = le.transform(yte)
+    acc = accuracy_score(yte_enc, yhat)
+    f1  = f1_score(yte_enc, yhat, average="macro", zero_division=0)
+    print(f"\n  test acc = {acc:.4f}   macro-f1 = {f1:.4f}")
+    print()
+    print(classification_report(yte_enc, yhat, target_names=le.classes_, zero_division=0))
+
+    artifact = {"pipeline": pipe, "label_encoder": le, "features": kept}
+    out_model = os.path.join(args.out, "payload_model.joblib")
+    out_feats = os.path.join(args.out, "payload_features.txt")
+    joblib.dump(artifact, out_model)
+    with open(out_feats, "w") as fh:
+        fh.write("\n".join(kept) + "\n")
+    print(f"saved -> {out_model}  ({len(kept)} features)")
+    print(f"saved -> {out_feats}")
+
+
 if __name__ == "__main__":
-    main()
+    import sys as _sys
+    # Check if --payload-train is given to route to payload trainer
+    if "--payload-train" in _sys.argv:
+        ap2 = argparse.ArgumentParser(description="Train payload ML model.")
+        ap2.add_argument("--payload-train", nargs="+", required=True)
+        ap2.add_argument("--payload-test",  nargs="+", required=True)
+        ap2.add_argument("--model",    choices=["xgb", "rf"], default="xgb")
+        ap2.add_argument("--features", default="all")
+        ap2.add_argument("--out",      default=OUT_DIR_DEFAULT)
+        ap2.add_argument("--seed",     type=int, default=42)
+        args2 = ap2.parse_args()
+        os.makedirs(args2.out, exist_ok=True)
+        train_payload_model(args2)
+    else:
+        main()

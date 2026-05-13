@@ -31,10 +31,11 @@ import collections
 import logging
 import os
 import sys
+import threading
 import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
-from typing import Deque
+from typing import Deque, Optional
 
 # ---------------------------------------------------------------------------
 # Path setup: works both from repo (opnsense/) and installed (/usr/local/dnp3guard/)
@@ -105,6 +106,78 @@ class _RateTracker:
 
 
 # ---------------------------------------------------------------------------
+# Per-flow payload feature accumulator (mirrors pcap_payload_features._FlowAcc)
+# ---------------------------------------------------------------------------
+
+class _FlowAcc:
+    __slots__ = ("total", "fwd", "bwd", "attack_fc", "link_status",
+                 "fc_counts", "udata_lens", "last_seen")
+
+    def __init__(self) -> None:
+        self.total = 0; self.fwd = 0; self.bwd = 0
+        self.attack_fc = 0; self.link_status = 0
+        self.fc_counts: dict[int, int] = collections.defaultdict(int)
+        self.udata_lens: list[int] = []
+        self.last_seen = time.monotonic()
+
+    def add(self, frames, is_fwd: bool) -> None:
+        self.last_seen = time.monotonic()
+        for f in frames:
+            self.total += 1
+            if is_fwd: self.fwd += 1
+            else:       self.bwd += 1
+            if f.is_attack:      self.attack_fc += 1
+            if f.is_link_status: self.link_status += 1
+            if f.fc is not None: self.fc_counts[f.fc] += 1
+            if f.user_data_len > 0: self.udata_lens.append(f.user_data_len)
+
+    def to_feature_dict(self) -> dict:
+        t = self.total or 1
+        ud = self.udata_lens or [0]
+        mc = max(self.fc_counts, key=self.fc_counts.get) if self.fc_counts else -1
+        return {
+            "total_frames":       self.total,
+            "fwd_frames":         self.fwd,
+            "bwd_frames":         self.bwd,
+            "response_ratio":     self.bwd / t,
+            "attack_fc_count":    self.attack_fc,
+            "attack_fc_ratio":    self.attack_fc / t,
+            "link_status_count":  self.link_status,
+            "link_status_ratio":  self.link_status / t,
+            "unique_fcs":         len(self.fc_counts),
+            "most_common_req_fc": mc,
+            "fc_read":            self.fc_counts.get(0x01, 0),
+            "fc_cold_restart":    self.fc_counts.get(0x0D, 0),
+            "fc_warm_restart":    self.fc_counts.get(0x0E, 0),
+            "fc_init_data":       self.fc_counts.get(0x0F, 0),
+            "fc_stop_app":        self.fc_counts.get(0x12, 0),
+            "fc_init_app":        self.fc_counts.get(0x14, 0),
+            "fc_disable_unsol":   self.fc_counts.get(0x15, 0),
+            "fc_response":        self.fc_counts.get(0x81, 0),
+            "fc_unsol_response":  self.fc_counts.get(0x82, 0),
+            "mean_udata_len":     sum(ud) / len(ud),
+            "max_udata_len":      max(ud),
+            "min_udata_len":      min(ud),
+        }
+
+
+# ---------------------------------------------------------------------------
+# Optional payload ML model loader
+# ---------------------------------------------------------------------------
+
+def _load_payload_model(path: Optional[str]):
+    if not path:
+        return None, None, None
+    try:
+        import joblib, numpy as np, pandas as pd
+        art = joblib.load(path)
+        return art["pipeline"], art["label_encoder"], art["features"]
+    except Exception as e:
+        print(f"[pkt_inspect] payload model load failed: {e}", file=sys.stderr)
+        return None, None, None
+
+
+# ---------------------------------------------------------------------------
 # Packet callback
 # ---------------------------------------------------------------------------
 
@@ -115,54 +188,124 @@ class Inspector:
         logger: logging.Logger,
         scan_threshold: int,
         scan_window: float,
+        payload_model_path: Optional[str] = None,
+        flow_timeout: float = 30.0,
     ) -> None:
         self._port = port
         self._log = logger
         self._scan = _RateTracker(scan_window, scan_threshold)
-        # Cooldown for COMMAND_INJECTION per (src_ip, fc) to reduce log flood
         self._last_fc_alert: dict[tuple, float] = {}
-        self._fc_cooldown = 5.0  # seconds between repeated FC alerts
+        self._fc_cooldown = 5.0
 
-    def handle_packet(self, pkt) -> None:  # type: ignore[no-untyped-def]
+        # Per-flow accumulators keyed by canonical 4-tuple
+        self._flows: dict[tuple, _FlowAcc] = {}
+        self._flow_lock = threading.Lock()
+        self._flow_timeout = flow_timeout
+
+        # Payload ML model (optional)
+        self._pipe, self._le, self._feats = _load_payload_model(payload_model_path)
+        if self._pipe is not None:
+            self._log.info("[pkt_inspect] payload ML model loaded from %s", payload_model_path)
+
+        # Background thread to expire idle flows and run payload ML on them
+        self._reaper = threading.Thread(target=self._reap_loop, daemon=True)
+        self._reaper.start()
+
+    def _flow_key(self, src_ip, src_port, dst_ip, dst_port) -> tuple:
+        """Canonical bidirectional key (smaller tuple first)."""
+        a = (src_ip, src_port, dst_ip, dst_port)
+        b = (dst_ip, dst_port, src_ip, src_port)
+        return a if a < b else b
+
+    def handle_packet(self, pkt) -> None:
         try:
             from scapy.layers.inet import IP, TCP
-            if not pkt.haslayer(TCP):
+            if not (pkt.haslayer(TCP) and pkt.haslayer(IP)):
                 return
             tcp = pkt[TCP]
+            ip  = pkt[IP]
             if tcp.dport != self._port and tcp.sport != self._port:
                 return
             raw = bytes(tcp.payload)
-            if not raw:
-                return
+            is_fwd = (tcp.dport == self._port)
+            src_ip, dst_ip = ip.src, ip.dst
 
-            src_ip = pkt[IP].src if pkt.haslayer(IP) else "?"
-            self._inspect(src_ip, raw)
+            frames = parse_payload(raw) if raw else []
+
+            # --- Immediate per-frame rule checks ---
+            for frame in frames:
+                if frame.is_attack:
+                    key = (src_ip, frame.fc)
+                    now = time.monotonic()
+                    if now - self._last_fc_alert.get(key, 0.0) >= self._fc_cooldown:
+                        self._last_fc_alert[key] = now
+                        self._log.warning(
+                            "ALERT-PAYLOAD src=%s port=%d COMMAND_INJECTION fc=%s(0x%02X)",
+                            src_ip, self._port, frame.attack_class, frame.fc,
+                        )
+                if frame.is_link_status:
+                    if self._scan.record(src_ip):
+                        self._log.warning(
+                            "ALERT-PAYLOAD src=%s port=%d DNP3_RECON ctrl=0xC9 burst",
+                            src_ip, self._port,
+                        )
+
+            # --- Accumulate into per-flow state (for payload ML) ---
+            if frames and self._pipe is not None:
+                fk = self._flow_key(src_ip, tcp.sport, dst_ip, tcp.dport)
+                with self._flow_lock:
+                    if fk not in self._flows:
+                        self._flows[fk] = _FlowAcc()
+                    self._flows[fk].add(frames, is_fwd)
+
+            # --- Expire flow immediately on FIN/RST ---
+            if self._pipe is not None:
+                flags = tcp.flags
+                if flags & 0x01 or flags & 0x04:   # FIN or RST
+                    fk = self._flow_key(src_ip, tcp.sport, dst_ip, tcp.dport)
+                    with self._flow_lock:
+                        acc = self._flows.pop(fk, None)
+                    if acc and acc.total > 0:
+                        self._run_payload_ml(acc, src_ip)
+
         except Exception:
             pass
 
-    def _inspect(self, src_ip: str, payload: bytes) -> None:
-        frames = parse_payload(payload)
-        for frame in frames:
-            # --- COMMAND_INJECTION check ---
-            if frame.is_attack:
-                key = (src_ip, frame.fc)
-                now = time.monotonic()
-                last = self._last_fc_alert.get(key, 0.0)
-                if now - last >= self._fc_cooldown:
-                    self._last_fc_alert[key] = now
-                    self._log.warning(
-                        "ALERT-PAYLOAD src=%s port=%d COMMAND_INJECTION fc=%s(0x%02X)",
-                        src_ip, self._port, frame.attack_class, frame.fc
-                    )
+    def _run_payload_ml(self, acc: _FlowAcc, src_ip: str) -> None:
+        try:
+            import numpy as np, pandas as pd
+            feat = acc.to_feature_dict()
+            row  = pd.DataFrame([feat])[self._feats].astype(np.float32)
+            pred_enc = self._pipe.predict(row)[0]
+            proba    = self._pipe.predict_proba(row)[0]
+            label    = self._le.inverse_transform([pred_enc])[0]
+            conf     = float(proba[pred_enc])
+            if label != "NORMAL":
+                self._log.warning(
+                    "ALERT-PAYLOAD-ML src=%s port=%d label=%s conf=%.2f "
+                    "frames=%d attack_fc=%d link_status=%d",
+                    src_ip, self._port, label, conf,
+                    acc.total, acc.attack_fc, acc.link_status,
+                )
+            else:
+                self._log.debug(
+                    "PAYLOAD-ML NORMAL conf=%.2f frames=%d", conf, acc.total)
+        except Exception as e:
+            self._log.debug("payload ML error: %s", e)
 
-            # --- Scan / recon check (ctrl=0xC9 rate) ---
-            if frame.is_link_status:
-                if self._scan.record(src_ip):
-                    self._log.warning(
-                        "ALERT-PAYLOAD src=%s port=%d DNP3_RECON "
-                        "ctrl=0xC9 burst detected",
-                        src_ip, self._port
-                    )
+    def _reap_loop(self) -> None:
+        """Expire flows idle longer than _flow_timeout and run ML on them."""
+        while True:
+            time.sleep(5)
+            cutoff = time.monotonic() - self._flow_timeout
+            expired = []
+            with self._flow_lock:
+                for k, acc in list(self._flows.items()):
+                    if acc.last_seen < cutoff:
+                        expired.append((k, self._flows.pop(k)))
+            for (src_ip, src_port, dst_ip, dst_port), acc in expired:
+                if acc.total > 0:
+                    self._run_payload_ml(acc, src_ip)
 
 
 # ---------------------------------------------------------------------------
@@ -171,7 +314,7 @@ class Inspector:
 
 def main() -> None:
     ap = argparse.ArgumentParser(
-        description="Live DNP3 payload inspector (COMMAND_INJECTION + recon)"
+        description="Live DNP3 payload inspector (COMMAND_INJECTION + recon + ML)"
     )
     ap.add_argument("--iface",          default=None,
                     help="capture interface (None = scapy default)")
@@ -183,13 +326,19 @@ def main() -> None:
                     help="ctrl=0xC9 packets per src within window to trigger DNP3_RECON")
     ap.add_argument("--scan-window",    type=float, default=10.0,
                     help="sliding window in seconds for scan rate counting")
+    ap.add_argument("--payload-model",  default=None,
+                    help="path to payload_model.joblib; enables per-flow ML "
+                         "classification of COLD_RESTART/WARM_RESTART/etc.")
+    ap.add_argument("--flow-timeout",   type=float, default=30.0,
+                    help="seconds of inactivity before a flow is expired for ML scoring")
     a = ap.parse_args()
 
     logger = _setup_logger(a.log, a.log_level)
     logger.info(
         "[pkt_inspect] starting  iface=%s port=%d "
-        "scan_threshold=%d scan_window=%.1fs",
-        a.iface or "default", a.port, a.scan_threshold, a.scan_window
+        "scan_threshold=%d scan_window=%.1fs payload_model=%s",
+        a.iface or "default", a.port, a.scan_threshold, a.scan_window,
+        a.payload_model or "none",
     )
 
     try:
@@ -202,6 +351,8 @@ def main() -> None:
         logger=logger,
         scan_threshold=a.scan_threshold,
         scan_window=a.scan_window,
+        payload_model_path=a.payload_model,
+        flow_timeout=a.flow_timeout,
     )
 
     bpf = f"tcp port {a.port}"
